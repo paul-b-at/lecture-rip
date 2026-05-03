@@ -1,0 +1,12 @@
+node_modules/
+bun.lockb
+.env
+.env.local
+.auth.json
+tmp/
+*.opus
+*.mp4
+*.wav
+.DS_Store
+dist/
+*.log
