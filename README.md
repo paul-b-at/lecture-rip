@@ -28,7 +28,7 @@ AI lecture transcriber for JKU — **GitHub Actions runs hourly** (`0 * * * *` U
 
 **Lectures** — expected fields: title (`Name` by default), `Lecture ID` (rich text, episode UUID), **link to Subject** (`Course ID` rich-text UUID **or** relation **Subjects** column), **`Moodle URL`** (URL), `Status` (select), `Skip Reason`. Omit any extra **Course** title column—the Subject relation (or Subject uuid) identifies the course. The Gemini summary is on the lecture **page body** (blocks). Rename columns via `NOTION_LECTURES_*` (see `.env.example`). **`NOTION_LECTURES_SUBJECT_KIND=relation`** when the Subject column is a relation. If env names are omitted in CI (empty Actions secrets), the runner infers **`JKU Lecture ID`**, relation **`Subjects`**, and **`Source URL`** when those exact columns exist.
 
-Semester tagging follows OpenCast: **`YYYYW`** (Wintersemester Oct–Feb) vs **`YYYYS`** (Sommersemester Mar–Sep), see [`src/semester.ts`](src/semester.ts). Override with **`MEDIA_SEMESTER`** (e.g. `2026S`). Set `auto` explicitly to reuse the computed default.
+Semester tagging follows OpenCast: **`YYYYW`** (Wintersemester roughly Oct–Feb) vs **`YYYYS`** (Sommersemester Mar–Sep). When **`MEDIA_SEMESTER`** is unset or `auto`, the runner infers “today” in **`MEDIA_SEMESTER_TZ`** (default **`Europe/Vienna`**) so GitHub Actions (UTC clocks) aligns with Austrian term switches ([`src/semester.ts`](src/semester.ts)). Pin with **`MEDIA_SEMESTER=2026S`** when you want that prefix regardless of calendar.
 
 ## Setup
 
@@ -38,9 +38,9 @@ Semester tagging follows OpenCast: **`YYYYW`** (Wintersemester Oct–Feb) vs **`
 
 To capture logs, use `bun run start:tee` (creates `logs/`, then runs with `bash -o pipefail` so if `bun` fails, the script’s exit code reflects that—not just `tee`).
 
-Optional env: `MEDIA_BASE_URL`, `MEDIA_SEMESTER`, `COURSE_FILTER`, `MEDIA_SESSION_COOKIE`, `MEDIA_PLAYWRIGHT_STATE`.
+Optional env: `MEDIA_BASE_URL`, `MEDIA_SEMESTER`, `MEDIA_SEMESTER_TZ`, `MEDIA_RESOLVE_LOOSE_LU`, `COURSE_FILTER`, `MEDIA_SESSION_COOKIE`, `MEDIA_PLAYWRIGHT_STATE`.
 
-**Discovery finds 0 lectures:** (1) Each Subject row needs **Media Course ID** (full series name like `2026S344090`, LU-only digits paired with **`MEDIA_SEMESTER`**, or a watch/play URL hint) **or** **Media Series ID** (series UUID). (2) **Notion column names** must match (override with **`NOTION_SUBJECTS_*`**). (3) **`COURSE_FILTER`** can exclude every Subject. (4) Anonymous **`/search/`** may omit your course — set **`MEDIA_SESSION_COOKIE`** from a logged-in browser or paste the **series UUID**. (5) If you store **LU-only** IDs, discovery steps through **neighbor semesters** (e.g. `2026S` then `2025W`) because OpenCast titles often disagree with calendar **`MEDIA_SEMESTER`**.
+**Discovery finds 0 lectures:** (1) Each Subject row needs **Media Course ID** (full series name like `2026S344090`, LU-only digits paired with **`MEDIA_SEMESTER`**, or a watch/play URL hint) **or** **Media Series ID** (series UUID). (2) **Notion column names** must match (override with **`NOTION_SUBJECTS_*`**). (3) **`COURSE_FILTER`** can exclude every Subject. (4) Anonymous **`/search/`** may omit your course — set **`MEDIA_SESSION_COOKIE`** from a logged-in browser or paste the **series UUID**. (5) If you store **LU-only** IDs, discovery walks **neighbor semesters** but **prefers your calendar/`MEDIA_SEMESTER` OpenCast prefix** (`2026S…`) when several terms share the LU; use a **full OpenCast key** (`2026S344090`) or pin **`MEDIA_SEMESTER`** when the wrong term is chosen. Loose LU substring guessing is **`MEDIA_RESOLVE_LOOSE_LU`** (default off — wrong-semester traps).
 
 Some courses stay out of **anonymous** `/search/` results (nothing matches `2026S…344090`). Paella relies on `/search/episode.json?id=` with your browser cookies.
 
@@ -103,7 +103,9 @@ Uses **`ubuntu-latest`** with **`paths: .cache`** cache key `lecture-rip-state-v
 | `MEDIA_BASE_URL` | *(optional)* default `https://media.jku.at` |
 | `MEDIA_SESSION_COOKIE` | *(optional)* full `Cookie` header for MEDIA_BASE_URL; use when ACL blocks anonymous `/search/` |
 | `MEDIA_PLAYWRIGHT_STATE` | *(optional)* Playwright storage state JSON path (interactive login only makes sense locally) |
-| `MEDIA_SEMESTER` | *(optional)* e.g. `2026S`; leave empty for auto |
+| `MEDIA_SEMESTER` | *(optional)* e.g. `2026S`; leave empty/`auto` for inferred term |
+| `MEDIA_SEMESTER_TZ` | *(optional)* IANA zone for auto semester (default **`Europe/Vienna`** on empty secret) |
+| `MEDIA_RESOLVE_LOOSE_LU` | *(optional)* opt-in LU substring heuristic when strict search stays empty (**risk**: wrong semester) |
 
 Notion column-title overrides (**`NOTION_LECTURES_*`**, **`NOTION_SUBJECTS_*`**) mirror `.env`; set them under **Repository → Settings → Secrets and variables → Actions** so CI matches local `.env`.
 

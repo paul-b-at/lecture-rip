@@ -11,6 +11,7 @@ import {
   writePostprocessResults,
 } from './notion'
 import { postprocess } from './postprocess'
+import { semesterAnchorForPipeline } from './semester'
 import { transcribe } from './transcribe'
 import {
   isQuotaError,
@@ -75,7 +76,12 @@ function ensureGroqBudgetBeforeNewHeavyWork(budget: BudgetTracker, estimatedAudi
 async function main() {
   console.log('[lecture-rip] Starting pipeline...')
   console.log(`[lecture-rip] force_rerip=${FORCE}, course_filter=${COURSE_FILTER ?? '(none)'}`)
-  console.log(`[lecture-rip] MEDIA_SEMESTER=${(process.env.MEDIA_SEMESTER ?? '').trim() || '(unset → calendar default)'}`)
+  const semesterInfo = semesterAnchorForPipeline()
+  const semLog =
+    semesterInfo.source === 'env'
+      ? `${semesterInfo.semester} (from MEDIA_SEMESTER)`
+      : `${semesterInfo.semester} (auto • JKU calendar • ${semesterInfo.timeZoneUsed ?? '?'}; Oct–Feb→W • Mar–Sep→S)`
+  console.log(`[lecture-rip] MEDIA_SEMESTER=${semLog}`)
 
   const budget = await BudgetTracker.load()
   console.log(`[lecture-rip] Budget: ${budget.summary()}`)

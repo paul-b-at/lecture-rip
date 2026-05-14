@@ -132,11 +132,18 @@ async function fetchSeriesBatchByQuery(base: string, qRaw: string): Promise<Seri
   return out
 }
 
+function mediaResolveLooseLuDefault(): boolean {
+  const t = typeof process !== 'undefined' ? (process.env.MEDIA_RESOLVE_LOOSE_LU ?? '').trim().toLowerCase() : ''
+  return t === '1' || t === 'true' || t === 'yes'
+}
+
 export async function resolveSeriesForSubject(opts: {
   baseUrl?: string
   semester: string
   mediaCourseId: string
   mediaSeriesIdHint?: string
+  /** When search returns unrelated rows, allow “unique LU substring” heuristic (risk: wrong semester). Default from `MEDIA_RESOLVE_LOOSE_LU`. */
+  allowLooseLu?: boolean
 }): Promise<SeriesHit | null> {
   const base = normalizeMediaBase(opts.baseUrl)
   const pinned = parseUuid(opts.mediaSeriesIdHint)
@@ -151,6 +158,8 @@ export async function resolveSeriesForSubject(opts: {
   if (!lu || lu.length < 3) return null
 
   const pref = `${semEff}${lu}`
+  /** Full OpenCast titles are explicit — never widen with substring heuristics. */
+  const allowLoose = fullSeriesTitle == null && (opts.allowLooseLu ?? mediaResolveLooseLuDefault())
 
   /** Prefer lucene title query (`q=`); `/search/` supports plain tokens like `2026S229054` reliably. */
   const fromQueries: SeriesHit[] = []
@@ -176,11 +185,11 @@ export async function resolveSeriesForSubject(opts: {
     ?? fromQueries.find((h) => seriesTitlesMatch(h.title.trim(), semEff, lu))
     ?? null
 
-  if (!matchFromQ && fromQueries.length > 0) {
-    /** Calendar `MEDIA_SEMESTER` can disagree with LU-only rows (Winter vs Summer). Unique substring match — safe when unambiguous */
+  if (!matchFromQ && allowLoose && fromQueries.length > 0) {
+    /** Unique substring match — can pick wrong LU/semester; opt-in via `MEDIA_RESOLVE_LOOSE_LU`. */
     const uniqueLu = fromQueries.filter((h) => h.title.includes(lu))
     if (uniqueLu.length === 1) {
-      console.warn(`[resolveSeries] Matched LU ${lu} loosely (wrong semester?): ${uniqueLu[0].title}`)
+      console.warn(`[resolveSeries] Loose LU substring match (${lu}): ${uniqueLu[0].title}`)
       return uniqueLu[0]
     }
   }
@@ -195,10 +204,10 @@ export async function resolveSeriesForSubject(opts: {
   const resolved = exact ?? filtered.find((h) => seriesTitlesMatch(h.title.trim(), semEff, lu)) ?? null
   if (resolved) return resolved
 
-  if (all.length > 0) {
+  if (all.length > 0 && allowLoose) {
     const uniqueLuAll = all.filter((h) => h.title.includes(lu))
     if (uniqueLuAll.length === 1) {
-      console.warn(`[resolveSeries] Matched LU ${lu} loosely via sname index: ${uniqueLuAll[0].title}`)
+      console.warn(`[resolveSeries] Loose LU via sname index (${lu}): ${uniqueLuAll[0].title}`)
       return uniqueLuAll[0]
     }
   }

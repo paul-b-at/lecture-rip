@@ -9,7 +9,77 @@ import {
   resolveSeriesForSubject,
   seriesTitlesMatch,
 } from './media-jku'
-import { defaultJkuMediaSemester, luOnlyDiscoverySemestersInOrder } from './semester'
+import { luOnlyDiscoverySemestersInOrder, semesterAnchorForPipeline } from './semester'
+
+/** Opt-in heuristic that can tie-break wrong semester / wrong course (same LU digits elsewhere). Default off. */
+function envMediaResolveLooseLuBool(): boolean {
+  const raw = typeof process !== 'undefined' ? (process.env.MEDIA_RESOLVE_LOOSE_LU ?? '').trim().toLowerCase() : ''
+  return raw === '1' || raw === 'true' || raw === 'yes'
+}
+
+type ResolvedSeriesHit = NonNullable<Awaited<ReturnType<typeof resolveSeriesForSubject>>>
+
+/** Probe each ladder semester once; dedup by OpenCast series UUID, keep insertion order (ladder-first). */
+async function collectLuSeriesCandidatesAcrossLadder(
+  base: string,
+  mediaCourseId: string,
+  mediaSeriesHint: string,
+  ladderSemesters: readonly string[],
+  allowLooseLu: boolean,
+): Promise<Array<{ sem: string; hit: ResolvedSeriesHit }>> {
+  const seen = new Set<string>()
+  const ordered: Array<{ sem: string; hit: ResolvedSeriesHit }> = []
+
+  for (const semTry of ladderSemesters) {
+    const hit = await resolveSeriesForSubject({
+      baseUrl: base,
+      semester: semTry,
+      mediaCourseId,
+      mediaSeriesIdHint: mediaSeriesHint,
+      allowLooseLu,
+    })
+    if (hit && !seen.has(hit.id)) {
+      seen.add(hit.id)
+      ordered.push({ sem: semTry, hit })
+    }
+  }
+
+  return ordered
+}
+
+/**
+ * Prefer the hit whose ladder semester equals `anchorSem`, else one whose OpenCast series title prefixes
+ * `{anchorSem}{lu}`, else the first ladder match (typically an older WS term vs calendar SS — warn once).
+ */
+function pickPreferredLuSeries(
+  anchorSem: string,
+  luDigits: string,
+  ordered: Array<{ sem: string; hit: ResolvedSeriesHit }>,
+): { sem: string; hit: ResolvedSeriesHit } | null {
+  if (ordered.length === 0) return null
+
+  const byAnchoredSem = ordered.find(({ sem }) => sem === anchorSem)
+  if (byAnchoredSem) return byAnchoredSem
+
+  const byAnchoredTitle = ordered.find(({ hit }) => seriesTitlesMatch(hit.title.trim(), anchorSem, luDigits))
+  if (byAnchoredTitle) return byAnchoredTitle
+
+  if (ordered.length > 1) {
+    const titles = ordered.map(({ hit }) => hit.title.trim()).slice(0, 4)
+    console.warn(
+      `[discover]   LU ${luDigits}: ${ordered.length} OpenCast series match across semesters (${titles.join(' · ')}…); `
+        + `picking ladder-first («${ordered[0]!.hit.title}», ${ordered[0]!.sem}). Set full Media Course ID (e.g. ${anchorSem}${luDigits}) or **MEDIA_SEMESTER**.`,
+    )
+  }
+  else {
+    console.warn(
+      `[discover]   LU ${luDigits}: only «${ordered[0]!.hit.title}» matched (semester ${ordered[0]!.sem}); `
+        + `anchor was ${anchorSem}. Set **MEDIA_SEMESTER** or full OpenCast key if this is wrong.`,
+    )
+  }
+
+  return ordered[0] ?? null
+}
 
 export interface DiscoveredLecture {
   id: string
@@ -32,7 +102,7 @@ function parseUuid(raw: string): string | null {
  * Each Notion Subject needs **Media Course ID** (series name like `2026S344090`, LU digits only, or Engage/play URL),
  * and/or **Media Series ID** (OpenCast UUID). Anonymous discovery may lag ACL; **`MEDIA_SESSION_COOKIE`** aligns with Paella.
  * Calendar `MEDIA_SEMESTER` is ignored when the series name embeds `YYYYW|YYYYS`.
- * LU-only rows try **neighbor semesters** in order (`luOnlyDiscoverySemestersInOrder`) until search hits a matching series title.
+ * LU-only rows scan **neighbor semesters**, collect matches, and **prefer** the anchor from **`semesterAnchorForPipeline`** (explicit `MEDIA_SEMESTER` when set, otherwise JKU/OpenCast rules in **`MEDIA_SEMESTER_TZ`**, default Vienna). Loose substring LU matching is opt-in (`MEDIA_RESOLVE_LOOSE_LU`).
  */
 export async function discoverLecturesFromMedia(
   subjects: Subject[],
@@ -47,9 +117,27 @@ export async function discoverLecturesFromMedia(
   const base = normalizeMediaBase(opts.baseUrl ?? process.env.MEDIA_BASE_URL)
 
   let semester = (opts.semesterOverride ?? '').trim() || (process.env.MEDIA_SEMESTER ?? '').trim()
-
   if (/^auto$/i.test(semester)) semester = ''
-  if (!semester) semester = defaultJkuMediaSemester()
+
+  if (!semester) {
+    const anchor = semesterAnchorForPipeline()
+    semester = anchor.semester
+    if (anchor.source === 'auto' && anchor.timeZoneUsed) {
+      console.log(`[discover] semester anchor ${anchor.semester} (auto • OpenCast/JKU • ${anchor.timeZoneUsed}; Oct→W Jan–Feb→W Mar–Sep→S)`)
+    }
+  }
+  else {
+    const m = semester.match(/^(\d{4})([SsWw])$/i)
+    if (m) semester = `${m[1]}${m[2].toUpperCase()}`
+    else {
+      console.warn(`[discover] MEDIA_SEMESTER «${semester}» is not YYYY[SW]; using calendar anchor`)
+      const anchor = semesterAnchorForPipeline()
+      semester = anchor.semester
+      if (anchor.source === 'auto' && anchor.timeZoneUsed) {
+        console.log(`[discover] semester anchor ${anchor.semester} (auto • ${anchor.timeZoneUsed})`)
+      }
+    }
+  }
 
   console.log(`[discover] media.jku.at  semester=${semester}  base=${base}`)
 
@@ -99,22 +187,28 @@ export async function discoverLecturesFromMedia(
       const isLuOnly = parsedForLu.fullSeriesTitle === null && parsedForLu.lu.length >= 3
 
       if (isLuOnly) {
-        for (const semTry of luOnlyDiscoverySemestersInOrder(semester)) {
-          series = await resolveSeriesForSubject({
-            baseUrl: base,
-            semester: semTry,
-            mediaCourseId: subject.mediaCourseId,
-            mediaSeriesIdHint: subject.mediaSeriesId,
-          })
-          if (series) {
-            filterKey = parseMediaCourseKey(courseStr, semTry)
-            if (semTry !== semester) {
-              console.warn(
-                `[discover]   Matched LU ${parsedForLu.lu} with semester=${semTry} (calendar/MEDIA_SEMESTER hint was ${semester})`,
-              )
-            }
-            break
-          }
+        const ladder = luOnlyDiscoverySemestersInOrder(semester)
+        let ordered = await collectLuSeriesCandidatesAcrossLadder(
+          base,
+          subject.mediaCourseId,
+          subject.mediaSeriesId,
+          ladder,
+          false,
+        )
+        if (ordered.length === 0 && envMediaResolveLooseLuBool()) {
+          ordered = await collectLuSeriesCandidatesAcrossLadder(
+            base,
+            subject.mediaCourseId,
+            subject.mediaSeriesId,
+            ladder,
+            true,
+          )
+        }
+
+        const picked = pickPreferredLuSeries(semester, parsedForLu.lu, ordered)
+        if (picked) {
+          series = picked.hit
+          filterKey = parseMediaCourseKey(courseStr, picked.sem)
         }
       }
       else {
