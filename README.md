@@ -26,9 +26,9 @@ AI lecture transcriber for JKU — **GitHub Actions runs hourly** (`0 * * * *` U
 | **`Media Series ID`** | optional text / URL / formula | paste OpenCast **series UUID** to pin — skips ambiguous search |
 | `Glossary` | rich text | passed to Whisper as `prompt` |
 
-**Lectures** — expected fields: title (`Name` by default), `Lecture ID` (rich text, episode UUID), **link to Subject** (`Course ID` rich-text UUID **or** relation **Subjects** column), **`Moodle URL`** (URL), `Status` (select), `Skip Reason`. Omit any extra **Course** title column—the Subject relation (or Subject uuid) identifies the course. The Gemini summary is on the lecture **page body** (blocks). Rename columns via `NOTION_LECTURES_*` (see `.env.example`). **`NOTION_LECTURES_SUBJECT_KIND=relation`** when the Subject column is a relation.
+**Lectures** — expected fields: title (`Name` by default), `Lecture ID` (rich text, episode UUID), **link to Subject** (`Course ID` rich-text UUID **or** relation **Subjects** column), **`Moodle URL`** (URL), `Status` (select), `Skip Reason`. Omit any extra **Course** title column—the Subject relation (or Subject uuid) identifies the course. The Gemini summary is on the lecture **page body** (blocks). Rename columns via `NOTION_LECTURES_*` (see `.env.example`). **`NOTION_LECTURES_SUBJECT_KIND=relation`** when the Subject column is a relation. If env names are omitted in CI (empty Actions secrets), the runner infers **`JKU Lecture ID`**, relation **`Subjects`**, and **`Source URL`** when those exact columns exist.
 
-Semester tagging follows OpenCast: **`YYYYW`** (Wintersemester Oct–Feb) vs **`YYYYS`** (Sommersemester Mar–Sep), see [`src/semester.ts`](src/semester.ts). Override with **`MEDIA_SEMESTER`** (e.g. `2026S`). Set `auto` explicitly to reuse the computed default.
+Semester tagging follows OpenCast: **`YYYYW`** (Wintersemester roughly Oct–Feb) vs **`YYYYS`** (Sommersemester Mar–Sep). When **`MEDIA_SEMESTER`** is unset or `auto`, the runner infers “today” in **`MEDIA_SEMESTER_TZ`** (default **`Europe/Vienna`**) so GitHub Actions (UTC clocks) aligns with Austrian term switches ([`src/semester.ts`](src/semester.ts)). Pin with **`MEDIA_SEMESTER=2026S`** when you want that prefix regardless of calendar.
 
 ## Setup
 
@@ -38,7 +38,9 @@ Semester tagging follows OpenCast: **`YYYYW`** (Wintersemester Oct–Feb) vs **`
 
 To capture logs, use `bun run start:tee` (creates `logs/`, then runs with `bash -o pipefail` so if `bun` fails, the script’s exit code reflects that—not just `tee`).
 
-Optional env: `MEDIA_BASE_URL`, `MEDIA_SEMESTER`, `COURSE_FILTER`, `MEDIA_SESSION_COOKIE`, `MEDIA_PLAYWRIGHT_STATE`.
+Optional env: `MEDIA_BASE_URL`, `MEDIA_SEMESTER`, `MEDIA_SEMESTER_TZ`, `MEDIA_RESOLVE_LOOSE_LU`, `MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK`, `COURSE_FILTER`, `MEDIA_SESSION_COOKIE`, `MEDIA_PLAYWRIGHT_STATE`.
+
+**Discovery finds 0 lectures:** (1) Each Subject row needs **Media Course ID** (full series name like `2026S344090`, LU-only digits paired with **`MEDIA_SEMESTER`**, or a watch/play URL hint) **or** **Media Series ID** (series UUID). (2) **Notion column names** must match (override with **`NOTION_SUBJECTS_*`**). (3) **`COURSE_FILTER`** can exclude every Subject. (4) Anonymous **`/search/`** may omit your course — set **`MEDIA_SESSION_COOKIE`** from a logged-in browser or paste the **series UUID**. (5) If you store **LU-only** IDs, discovery scans neighbor terms but **keeps series only when the OpenCast title matches** your anchor (`2026S`+LU, etc.); **`MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK=true`** re‑enables reuse of older terms (e.g. last WS). Loose LU substring guesses: **`MEDIA_RESOLVE_LOOSE_LU`** (default off).
 
 Some courses stay out of **anonymous** `/search/` results (nothing matches `2026S…344090`). Paella relies on `/search/episode.json?id=` with your browser cookies.
 
@@ -83,7 +85,16 @@ Uses **`ubuntu-latest`** with **`paths: .cache`** cache key `lecture-rip-state-v
 | `NOTION_TOKEN` | Notion integration token |
 | `LECTURES_DS_ID` | Lectures database ID |
 | `SUBJECTS_DS_ID` | Subjects database ID |
+| `NOTION_LECTURES_LECTURE_ID` | *(optional)* Lectures DB **column title** for the OpenCast / dedupe id (defaults to `Lecture ID` — set if your columns are not English) |
+| `NOTION_LECTURES_COURSE_SUBJECT` | *(optional)* column for subject link (`Course ID` default) |
+| `NOTION_LECTURES_SUBJECT_KIND` | *(optional)* `relation` if that column is a Relation to Subjects; default `rich_text` |
+| `NOTION_LECTURES_MEDIA_URL` | *(optional)* URL column (`Moodle URL` default); use exact Notion title, e.g. **Media-Link** |
+| `NOTION_LECTURES_NAME` / `STATUS` / `SKIP_REASON` | *(optional)* only if those titles differ from defaults |
+| `NOTION_SUBJECTS_MEDIA_COURSE_ID` | *(optional)* Subjects DB column (`Media Course ID` default) |
+| `NOTION_SUBJECTS_MEDIA_SERIES_ID` | *(optional)* Subjects DB column (`Media Series ID` default) |
+| `NOTION_SUBJECTS_GLOSSARY` | *(optional)* Subjects glossary column |
 | `GROQ_API_KEY` | Groq API key |
+| `GEMINI_API_KEY` | Gemini API key |
 | `GROQ_HOURLY_AUDIO_SECONDS` | *(optional)* local cap on **decoded audio seconds per UTC hour** (default **`7200` ≈ 2h content** in that hour bucket; Groq-style rolling hour). Legacy secret name `GROQ_DAILY_AUDIO_SECONDS` still works as the same numeric cap for this **hourly** tally |
 | `GROQ_DIALY_REQUESTS` / `GROQ_DAILY_REQUESTS` | *(optional)* Whisper **requests per UTC calendar day** (default `200`) |
 | `GROQ_INTER_CHUNK_MS` | *(optional)* delay between chunk requests (`transcribe`); helps avoid Groq TPM/burst **429**s on multi-chunk opus files |
@@ -92,7 +103,12 @@ Uses **`ubuntu-latest`** with **`paths: .cache`** cache key `lecture-rip-state-v
 | `MEDIA_BASE_URL` | *(optional)* default `https://media.jku.at` |
 | `MEDIA_SESSION_COOKIE` | *(optional)* full `Cookie` header for MEDIA_BASE_URL; use when ACL blocks anonymous `/search/` |
 | `MEDIA_PLAYWRIGHT_STATE` | *(optional)* Playwright storage state JSON path (interactive login only makes sense locally) |
-| `MEDIA_SEMESTER` | *(optional)* e.g. `2026S`; leave empty for auto |
+| `MEDIA_SEMESTER` | *(optional)* e.g. `2026S`; leave empty/`auto` for inferred term |
+| `MEDIA_SEMESTER_TZ` | *(optional)* IANA zone for auto semester (default **`Europe/Vienna`** on empty secret) |
+| `MEDIA_RESOLVE_LOOSE_LU` | *(optional)* opt-in LU substring heuristic when strict search stays empty (**risk**: wrong semester) |
+| `MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK` | *(optional)* `true` to use last-winter series when current-term OpenCast title missing (default omit = strict) |
+
+Notion column-title overrides (**`NOTION_LECTURES_*`**, **`NOTION_SUBJECTS_*`**) mirror `.env`; set them under **Repository → Settings → Secrets and variables → Actions** so CI matches local `.env`.
 
 `JKU_USER` / `JKU_PASS` are **no longer** used.
 

@@ -1,15 +1,138 @@
 import { Client } from '@notionhq/client'
 import type { Lecture, PostprocessOutput, Stage, Subject } from './types'
 
-/** Notion **property names** must match your database schema (case‑sensitive). Override when your columns use different titles. */
-const LP = {
-  name: nv('NOTION_LECTURES_NAME', 'Name'),
-  lectureId: nv('NOTION_LECTURES_LECTURE_ID', 'Lecture ID'),
-  courseId: nv('NOTION_LECTURES_COURSE_SUBJECT', 'Course ID'),
-  watchUrl: nv('NOTION_LECTURES_MEDIA_URL', 'Moodle URL'),
-  status: nv('NOTION_LECTURES_STATUS', 'Status'),
-  skipReason: nv('NOTION_LECTURES_SKIP_REASON', 'Skip Reason'),
-} as const
+/** Default English template + common JKU-style synonyms (chosen only when DB has exact title + type). */
+
+type LectureLp = {
+  name: string
+  lectureId: string
+  courseId: string
+  watchUrl: string
+  status: string
+  skipReason: string
+}
+
+/** Single property `{ type }` from `databases.retrieve`. */
+type LectureDbProp = { type: string }
+
+let resolvedLP: LectureLp | null = null
+/** Set while resolving course column (`relation` ↔ `Subjects` vs `Course ID` rich_text). */
+let resolvedCourseSubjectKind: 'relation' | 'rich_text' | null = null
+
+function explicitEnv(key: string): string | undefined {
+  const t = typeof process !== 'undefined' ? (process.env[key] ?? '').trim() : ''
+  return t.length > 0 ? t : undefined
+}
+
+/** Legacy: env or English default — used **before** DB hydration (Subjects DB only). */
+function nv(key: string, fallback: string): string {
+  return explicitEnv(key) ?? fallback
+}
+
+/** First column in `titles`/`synonyms` that exists with one of `wantTypes`. Honors explicit env (`envKey`). */
+function resolveColumnTitle(
+  props: Record<string, LectureDbProp>,
+  envKey: string,
+  defaultEnglish: string,
+  wantTypes: readonly string[],
+  synonyms: readonly string[],
+): string {
+  const seq = [...new Set([explicitEnv(envKey), defaultEnglish, ...synonyms].filter((x): x is string => Boolean(x)))]
+  for (const name of seq) {
+    const p = props[name]
+    if (p && wantTypes.includes(p.type)) return name
+  }
+  return explicitEnv(envKey) ?? defaultEnglish
+}
+
+/** Title property: normally `Name`; respect NOTION_LECTURES_NAME then any single `title` column. */
+function resolveTitlePropName(props: Record<string, LectureDbProp>): string {
+  const ex = explicitEnv('NOTION_LECTURES_NAME')
+  if (ex && props[ex]?.type === 'title') return ex
+  const titleKeys = Object.keys(props).filter(k => props[k]?.type === 'title').sort()
+  if (explicitEnv('NOTION_LECTURES_NAME') === undefined && titleKeys.includes('Name')) return 'Name'
+  if (titleKeys.length === 1) return titleKeys[0]!
+  return explicitEnv('NOTION_LECTURES_NAME') ?? 'Name'
+}
+
+function pickCourseSubjectColumn(
+  props: Record<string, LectureDbProp>,
+): { name: string; kind: 'relation' | 'rich_text' } {
+  const exName = explicitEnv('NOTION_LECTURES_COURSE_SUBJECT')
+  const kindForced = explicitEnv('NOTION_LECTURES_SUBJECT_KIND')?.toLowerCase()
+
+  if (exName) {
+    const p = props[exName]
+    const forcedOk =
+      kindForced === 'relation' || kindForced === 'rich_text'
+        ? (kindForced as 'relation' | 'rich_text')
+        : undefined
+    if (forcedOk !== undefined)
+      return { name: exName, kind: forcedOk }
+    if (!p)
+      return { name: exName, kind: 'rich_text' }
+    if (p.type === 'relation')
+      return { name: exName, kind: 'relation' }
+    if (p.type === 'rich_text')
+      return { name: exName, kind: 'rich_text' }
+    return { name: exName, kind: 'rich_text' }
+  }
+
+  const relationSyns = ['Subjects', 'Subject', 'Courses', 'Course'] as const
+  for (const s of relationSyns) {
+    if (props[s]?.type === 'relation') return { name: s, kind: 'relation' }
+  }
+
+  const rtSyns = ['Course ID', 'Course'] as const
+  for (const s of rtSyns) {
+    if (props[s]?.type === 'rich_text') return { name: s, kind: 'rich_text' }
+  }
+
+  return { name: 'Course ID', kind: 'rich_text' }
+}
+
+function buildResolvedLectureProps(props: Record<string, LectureDbProp>): {
+  lectureProps: LectureLp
+  courseSubjectKind: 'relation' | 'rich_text'
+} {
+  const course = pickCourseSubjectColumn(props)
+
+  return {
+    lectureProps: {
+      name: resolveTitlePropName(props),
+      lectureId: resolveColumnTitle(
+        props,
+        'NOTION_LECTURES_LECTURE_ID',
+        'Lecture ID',
+        ['rich_text'],
+        ['JKU Lecture ID', 'OpenCast ID', 'Episode ID'],
+      ),
+      courseId: course.name,
+      watchUrl: resolveColumnTitle(
+        props,
+        'NOTION_LECTURES_MEDIA_URL',
+        'Moodle URL',
+        ['url'],
+        ['Source URL', 'Media URL', 'Watch URL', 'JKU Media URL'],
+      ),
+      status: resolveColumnTitle(
+        props,
+        'NOTION_LECTURES_STATUS',
+        'Status',
+        ['select'],
+        ['Stage', 'Pipeline status'],
+      ),
+      skipReason: resolveColumnTitle(
+        props,
+        'NOTION_LECTURES_SKIP_REASON',
+        'Skip Reason',
+        ['rich_text'],
+        ['Failure reason'],
+      ),
+    },
+    courseSubjectKind: course.kind,
+  }
+}
 
 const SP = {
   mediaCourseId: nv('NOTION_SUBJECTS_MEDIA_COURSE_ID', 'Media Course ID'),
@@ -17,36 +140,126 @@ const SP = {
   glossary: nv('NOTION_SUBJECTS_GLOSSARY', 'Glossary'),
 } as const
 
-function nv(key: string, fallback: string): string {
-  const v = (typeof process !== 'undefined' ? process.env[key] : '')?.trim()
-  return v || fallback
-}
-
 /** `NOTION_LECTURES_COURSE_SUBJECT` maps to Subject row id; column may be `rich_text` (UUID string) or a `relation` to Subjects. */
 function lectureSubjectColumnKind(): 'relation' | 'rich_text' {
-  const raw = nv('NOTION_LECTURES_SUBJECT_KIND', 'rich_text').toLowerCase()
-  return raw === 'relation' ? 'relation' : 'rich_text'
+  if (resolvedCourseSubjectKind != null) return resolvedCourseSubjectKind
+  const k = explicitEnv('NOTION_LECTURES_SUBJECT_KIND')?.toLowerCase()
+  if (k === 'relation') return 'relation'
+  return 'rich_text'
+}
+
+/** Column titles bound to your Lectures database after `validateLecturesDatabaseConfig`. */
+function lp(): LectureLp {
+  if (!resolvedLP)
+    throw new Error('validateLecturesDatabaseConfig() must run before other Notion lecture operations')
+  return resolvedLP
 }
 
 const notion = new Client({ auth: process.env.NOTION_TOKEN })
 const LECTURES_DB = process.env.LECTURES_DS_ID!
 const SUBJECTS_DB = process.env.SUBJECTS_DS_ID!
 
+let lecturesDbPropertiesCache: Record<string, LectureDbProp> | null = null
+
+/** Retrieve and cache Lectures DB property schema (name → `{ type }`). */
+export async function getLecturesDatabaseProperties(): Promise<Record<string, LectureDbProp>> {
+  if (lecturesDbPropertiesCache) return lecturesDbPropertiesCache
+  const db = await notion.databases.retrieve({ database_id: LECTURES_DB })
+  lecturesDbPropertiesCache = db.properties as Record<string, LectureDbProp>
+  return lecturesDbPropertiesCache
+}
+
+/**
+ * Fail fast with actionable errors when `NOTION_LECTURES_*` names/types do not match the Notion database.
+ * Lists every column title and type so you can copy exact spellings into `.env`.
+ */
+export async function validateLecturesDatabaseConfig(): Promise<void> {
+  const props = await getLecturesDatabaseProperties()
+  const { lectureProps: Lp, courseSubjectKind } = buildResolvedLectureProps(props)
+  resolvedLP = Lp
+  resolvedCourseSubjectKind = courseSubjectKind
+
+  const problems: string[] = []
+  const kind = lectureSubjectColumnKind()
+
+  const check = (columnTitle: string, want: string, envKey: string) => {
+    const p = props[columnTitle]
+    if (!p) {
+      problems.push(`No «${columnTitle}» column (want ${want}). Set ${envKey}=… to match your DB **exact title** (case-sensitive).`)
+      return
+    }
+    if (p.type !== want)
+      problems.push(`«${columnTitle}» exists but Notion type is «${p.type}», expected «${want}». Rename the column or point ${envKey} at a ${want} column.`)
+  }
+
+  check(Lp.name, 'title', 'NOTION_LECTURES_NAME')
+  check(Lp.lectureId, 'rich_text', 'NOTION_LECTURES_LECTURE_ID')
+  check(Lp.courseId, kind, 'NOTION_LECTURES_COURSE_SUBJECT')
+  check(Lp.watchUrl, 'url', 'NOTION_LECTURES_MEDIA_URL')
+  check(Lp.status, 'select', 'NOTION_LECTURES_STATUS')
+  check(Lp.skipReason, 'rich_text', 'NOTION_LECTURES_SKIP_REASON')
+
+  const statusProp = props[Lp.status] as { type?: string; select?: { options?: Array<{ name: string }> } } | undefined
+  if (statusProp?.type === 'select') {
+    const names =
+      statusProp.select?.options?.map(o => o.name).filter((n): n is string => Boolean(n?.trim()))
+      ?? []
+    if (names.length > 0 && !names.includes('Discovered')) {
+      problems.push(
+        `Status column «${Lp.status}» has no «Discovered» option. Existing options: ${names.join(', ')}.`,
+      )
+    }
+  }
+
+  if (problems.length === 0) {
+    console.log(
+      `[notion] Lectures DB mapped: Lecture→${Lp.lectureId} · Subject=${Lp.courseId} (${kind}) · Media→${Lp.watchUrl}`,
+    )
+    return
+  }
+
+  const listing = Object.keys(props)
+    .sort()
+    .map(k => `  • "${k}" → ${props[k]!.type}`)
+    .join('\n')
+
+  throw new Error(
+    `${problems.join('\n')}\n\nActual columns on the Lectures database:\n${listing}`
+      + `\n\nFix: optional \`NOTION_LECTURES_*\` in \`.env\` / Actions (see \`.env.example\`),`
+      + ` or rely on synonyms (JKU Lecture ID · Subjects relation · Source URL …) when unset.`,
+  )
+}
+
 export async function fetchSubjects(): Promise<Subject[]> {
-  const response = await notion.databases.query({ database_id: SUBJECTS_DB })
-  return response.results.map((page: any) => ({
-    id: page.id,
-    notionPageId: page.id,
-    name: getTitle(page),
-    mediaCourseId:
-      getRichText(page, SP.mediaCourseId)
-      || getFormulaString(page, SP.mediaCourseId),
-    mediaSeriesId:
-      getRichText(page, SP.mediaSeriesId)
-      || getUrl(page, SP.mediaSeriesId)
-      || extractFormulaUuid(page, SP.mediaSeriesId),
-    glossary: getRichText(page, SP.glossary),
-  }))
+  const out: Subject[] = []
+  let cursor: string | undefined
+
+  do {
+    const response: any = await notion.databases.query({
+      database_id: SUBJECTS_DB,
+      start_cursor: cursor,
+    })
+
+    for (const page of response.results) {
+      out.push({
+        id: page.id,
+        notionPageId: page.id,
+        name: getTitle(page),
+        mediaCourseId:
+          getRichText(page, SP.mediaCourseId)
+          || getFormulaString(page, SP.mediaCourseId),
+        mediaSeriesId:
+          getRichText(page, SP.mediaSeriesId)
+          || getUrl(page, SP.mediaSeriesId)
+          || extractFormulaUuid(page, SP.mediaSeriesId),
+        glossary: getRichText(page, SP.glossary),
+      })
+    }
+
+    cursor = response.has_more ? response.next_cursor : undefined
+  } while (cursor)
+
+  return out
 }
 
 export async function fetchExistingLectures(): Promise<Map<string, Lecture>> {
@@ -60,22 +273,22 @@ export async function fetchExistingLectures(): Promise<Map<string, Lecture>> {
     })
 
     for (const page of response.results) {
-      const lectureId = getRichText(page, LP.lectureId)
+      const lectureId = getRichText(page, lp().lectureId)
       if (!lectureId) continue
 
       const sid =
         lectureSubjectColumnKind() === 'relation'
-          ? firstRelationTargetId(page, LP.courseId)
-          : getRichText(page, LP.courseId)
+          ? firstRelationTargetId(page, lp().courseId)
+          : getRichText(page, lp().courseId)
 
       map.set(lectureId, {
         id: lectureId,
         notionPageId: page.id,
         title: getTitle(page),
         courseId: sid,
-        moodleUrl: getUrl(page, LP.watchUrl) || getRichText(page, LP.watchUrl),
-        status: getSelect(page, LP.status) as Stage ?? 'Discovered',
-        skipReason: getRichText(page, LP.skipReason),
+        moodleUrl: getUrl(page, lp().watchUrl) || getRichText(page, lp().watchUrl),
+        status: getSelect(page, lp().status) as Stage ?? 'Discovered',
+        skipReason: getRichText(page, lp().skipReason),
       })
     }
 
@@ -94,22 +307,22 @@ export async function upsertLecture(
   const subjectProp =
     lectureSubjectColumnKind() === 'relation'
       ? ({
-          [LP.courseId]: lecture.courseId
+          [lp().courseId]: lecture.courseId
             ? { relation: [{ id: lecture.courseId }] }
             : { relation: [] },
         } satisfies Record<string, unknown>)
       : ({
-          [LP.courseId]: { rich_text: [{ text: { content: lecture.courseId } }] },
+          [lp().courseId]: { rich_text: [{ text: { content: lecture.courseId } }] },
         } satisfies Record<string, unknown>)
 
   const response = await notion.pages.create({
     parent: { database_id: LECTURES_DB },
     properties: {
-      [LP.name]: { title: [{ text: { content: lecture.title } }] },
-      [LP.lectureId]: { rich_text: [{ text: { content: lecture.id } }] },
+      [lp().name]: { title: [{ text: { content: lecture.title } }] },
+      [lp().lectureId]: { rich_text: [{ text: { content: lecture.id } }] },
       ...subjectProp,
-      [LP.watchUrl]: { url: lecture.moodleUrl },
-      [LP.status]: { select: { name: 'Discovered' } },
+      [lp().watchUrl]: { url: lecture.moodleUrl },
+      [lp().status]: { select: { name: 'Discovered' } },
     },
   })
 
@@ -120,7 +333,7 @@ export async function setStage(pageId: string, stage: Stage): Promise<void> {
   await notion.pages.update({
     page_id: pageId,
     properties: {
-      [LP.status]: { select: { name: stage } },
+      [lp().status]: { select: { name: stage } },
     },
   })
 }
@@ -129,7 +342,7 @@ export async function setSkipReason(pageId: string, reason: string): Promise<voi
   await notion.pages.update({
     page_id: pageId,
     properties: {
-      [LP.skipReason]: { rich_text: [{ text: { content: reason } }] },
+      [lp().skipReason]: { rich_text: [{ text: { content: reason } }] },
     },
   })
 }
