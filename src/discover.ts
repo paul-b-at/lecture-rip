@@ -17,6 +17,13 @@ function envMediaResolveLooseLuBool(): boolean {
   return raw === '1' || raw === 'true' || raw === 'yes'
 }
 
+/** When false (default), skip subjects whose explicit **Media Course ID** carries another OpenCast semester than the pipeline anchor (e.g. `2025W…` rows while anchor is auto `2026S`). Set `true` if you deliberately keep WS keys during SS (`MEDIA_ALLOW_OFF_ANCHOR_MEDIA_KEYS`). */
+function envAllowOffAnchorExplicitMediaKeys(): boolean {
+  const raw =
+    typeof process !== 'undefined' ? (process.env.MEDIA_ALLOW_OFF_ANCHOR_MEDIA_KEYS ?? '').trim().toLowerCase() : ''
+  return raw === '1' || raw === 'true' || raw === 'yes'
+}
+
 /** If false (default), LU-only discovery only keeps series whose OpenCast title matches anchor `YYYY[SW]{LU}` — no silent fallback to an older term. */
 function envAllowOlderSemLuFallback(): boolean {
   const raw =
@@ -191,6 +198,20 @@ export async function discoverLecturesFromMedia(
       continue
     }
 
+    /** Explicit OpenCast keys in Notion (`2025W365217`) always win internally — skip when they disagree with anchor (auto/MEDIA_SEMESTER), including when a pinned UUID exists alongside that text. */
+    if (
+      !envAllowOffAnchorExplicitMediaKeys()
+      && !episodeHintUuid
+      && filterKey.fullSeriesTitle != null
+      && filterKey.semester !== semester
+    ) {
+      console.warn(
+        `[discover]   Skip: «${filterKey.fullSeriesTitle}» is ${filterKey.semester} but pipeline anchor is ${semester}. `
+          + `Remove/archive for current term, use LU-only digits + anchor, or set MEDIA_ALLOW_OFF_ANCHOR_MEDIA_KEYS=true.`,
+      )
+      continue
+    }
+
     if (!pinned && episodeHintUuid) {
       console.log(`[discover]   OpenCast bootstrap  mediapackage=${episodeHintUuid}  (+ series via episode)`)
     } else if (!pinned) {
@@ -252,8 +273,19 @@ export async function discoverLecturesFromMedia(
     if (!series && episodeHintUuid) {
       const boot = await fetchEpisodeMediapackageById(base, episodeHintUuid)
       if (boot) {
+        const fkEpisode = parseMediaCourseKey(boot.episode.seriestitle, semester)
+        if (
+          !envAllowOffAnchorExplicitMediaKeys()
+          && fkEpisode.fullSeriesTitle != null
+          && fkEpisode.semester !== semester
+        ) {
+          console.warn(
+            `[discover]   Skip: watch URL maps to «${fkEpisode.fullSeriesTitle}» (${fkEpisode.semester}) but anchor is ${semester}.`,
+          )
+          continue
+        }
         series = { id: boot.seriesId, title: boot.episode.seriestitle || '(episode hint)' }
-        filterKey = parseMediaCourseKey(boot.episode.seriestitle, semester)
+        filterKey = fkEpisode
       }
     }
 
