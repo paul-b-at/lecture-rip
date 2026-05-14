@@ -47,6 +47,18 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           LECTURES_DS_ID: ${{ secrets.LECTURES_DS_ID }}
           SUBJECTS_DS_ID: ${{ secrets.SUBJECTS_DS_ID }}
+          # Optional: Lectures DB column titles (exact match; omit to use defaults in src/notion.ts)
+          NOTION_LECTURES_NAME: ${{ secrets.NOTION_LECTURES_NAME }}
+          NOTION_LECTURES_LECTURE_ID: ${{ secrets.NOTION_LECTURES_LECTURE_ID }}
+          NOTION_LECTURES_COURSE_SUBJECT: ${{ secrets.NOTION_LECTURES_COURSE_SUBJECT }}
+          NOTION_LECTURES_SUBJECT_KIND: ${{ secrets.NOTION_LECTURES_SUBJECT_KIND }}
+          NOTION_LECTURES_MEDIA_URL: ${{ secrets.NOTION_LECTURES_MEDIA_URL }}
+          NOTION_LECTURES_STATUS: ${{ secrets.NOTION_LECTURES_STATUS }}
+          NOTION_LECTURES_SKIP_REASON: ${{ secrets.NOTION_LECTURES_SKIP_REASON }}
+          # Optional: Subjects DB column titles
+          NOTION_SUBJECTS_MEDIA_COURSE_ID: ${{ secrets.NOTION_SUBJECTS_MEDIA_COURSE_ID }}
+          NOTION_SUBJECTS_MEDIA_SERIES_ID: ${{ secrets.NOTION_SUBJECTS_MEDIA_SERIES_ID }}
+          NOTION_SUBJECTS_GLOSSARY: ${{ secrets.NOTION_SUBJECTS_GLOSSARY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_DAILY_AUDIO_SECONDS: ${{ secrets.GROQ_DAILY_AUDIO_SECONDS }}
           GROQ_HOURLY_AUDIO_SECONDS: ${{ secrets.GROQ_HOURLY_AUDIO_SECONDS }}

@@ -176,6 +176,15 @@ export async function resolveSeriesForSubject(opts: {
     ?? fromQueries.find((h) => seriesTitlesMatch(h.title.trim(), semEff, lu))
     ?? null
 
+  if (!matchFromQ && fromQueries.length > 0) {
+    /** Calendar `MEDIA_SEMESTER` can disagree with LU-only rows (Winter vs Summer). Unique substring match — safe when unambiguous */
+    const uniqueLu = fromQueries.filter((h) => h.title.includes(lu))
+    if (uniqueLu.length === 1) {
+      console.warn(`[resolveSeries] Matched LU ${lu} loosely (wrong semester?): ${uniqueLu[0].title}`)
+      return uniqueLu[0]
+    }
+  }
+
   if (matchFromQ) return matchFromQ
 
   /** `sname` is not “LU substring” on JKU Opencast; only use as fallback and filter strictly. */
@@ -183,7 +192,18 @@ export async function resolveSeriesForSubject(opts: {
   const filtered = all.filter((h) => seriesTitlesMatch(h.title.trim(), semEff, lu))
   const exact =
     fullSeriesTitle != null ? filtered.find((h) => h.title === fullSeriesTitle.trim()) ?? null : null
-  return exact ?? filtered.find((h) => seriesTitlesMatch(h.title.trim(), semEff, lu)) ?? null
+  const resolved = exact ?? filtered.find((h) => seriesTitlesMatch(h.title.trim(), semEff, lu)) ?? null
+  if (resolved) return resolved
+
+  if (all.length > 0) {
+    const uniqueLuAll = all.filter((h) => h.title.includes(lu))
+    if (uniqueLuAll.length === 1) {
+      console.warn(`[resolveSeries] Matched LU ${lu} loosely via sname index: ${uniqueLuAll[0].title}`)
+      return uniqueLuAll[0]
+    }
+  }
+
+  return null
 }
 
 async function fetchAllSeriesMatchingSname(base: string, sname: string): Promise<SeriesHit[]> {

@@ -9,7 +9,7 @@ import {
   resolveSeriesForSubject,
   seriesTitlesMatch,
 } from './media-jku'
-import { defaultJkuMediaSemester } from './semester'
+import { defaultJkuMediaSemester, luOnlyDiscoverySemestersInOrder } from './semester'
 
 export interface DiscoveredLecture {
   id: string
@@ -32,6 +32,7 @@ function parseUuid(raw: string): string | null {
  * Each Notion Subject needs **Media Course ID** (series name like `2026S344090`, LU digits only, or Engage/play URL),
  * and/or **Media Series ID** (OpenCast UUID). Anonymous discovery may lag ACL; **`MEDIA_SESSION_COOKIE`** aligns with Paella.
  * Calendar `MEDIA_SEMESTER` is ignored when the series name embeds `YYYYW|YYYYS`.
+ * LU-only rows try **neighbor semesters** in order (`luOnlyDiscoverySemestersInOrder`) until search hits a matching series title.
  */
 export async function discoverLecturesFromMedia(
   subjects: Subject[],
@@ -91,12 +92,48 @@ export async function discoverLecturesFromMedia(
       )
     }
 
-    let series = await resolveSeriesForSubject({
-      baseUrl: base,
-      semester,
-      mediaCourseId: subject.mediaCourseId,
-      mediaSeriesIdHint: subject.mediaSeriesId,
-    })
+    let series: Awaited<ReturnType<typeof resolveSeriesForSubject>> = null
+
+    if (!pinned && !episodeHintUuid) {
+      const parsedForLu = parseMediaCourseKey(courseStr, semester)
+      const isLuOnly = parsedForLu.fullSeriesTitle === null && parsedForLu.lu.length >= 3
+
+      if (isLuOnly) {
+        for (const semTry of luOnlyDiscoverySemestersInOrder(semester)) {
+          series = await resolveSeriesForSubject({
+            baseUrl: base,
+            semester: semTry,
+            mediaCourseId: subject.mediaCourseId,
+            mediaSeriesIdHint: subject.mediaSeriesId,
+          })
+          if (series) {
+            filterKey = parseMediaCourseKey(courseStr, semTry)
+            if (semTry !== semester) {
+              console.warn(
+                `[discover]   Matched LU ${parsedForLu.lu} with semester=${semTry} (calendar/MEDIA_SEMESTER hint was ${semester})`,
+              )
+            }
+            break
+          }
+        }
+      }
+      else {
+        series = await resolveSeriesForSubject({
+          baseUrl: base,
+          semester,
+          mediaCourseId: subject.mediaCourseId,
+          mediaSeriesIdHint: subject.mediaSeriesId,
+        })
+      }
+    }
+    else {
+      series = await resolveSeriesForSubject({
+        baseUrl: base,
+        semester,
+        mediaCourseId: subject.mediaCourseId,
+        mediaSeriesIdHint: subject.mediaSeriesId,
+      })
+    }
 
     if (!series && episodeHintUuid) {
       const boot = await fetchEpisodeMediapackageById(base, episodeHintUuid)
@@ -128,6 +165,16 @@ export async function discoverLecturesFromMedia(
     let kept = episodes
     if (!pinned && filterKey.lu.length >= 3) {
       kept = episodes.filter((ep) => seriesTitlesMatch(ep.seriestitle.trim(), filterKey.semester, filterKey.lu))
+    }
+
+    if (episodes.length > 0 && kept.length === 0) {
+      const sample = [...new Set(episodes.slice(0, 8).map((e) => (e.seriestitle.trim() || '(empty)')))]
+      console.warn(
+        `[discover]   Episode seriestitle did not match ${filterKey.semester} + LU ${filterKey.lu}`
+          + ` (samples: ${sample.join('; ')})`
+          + ` — using ${episodes.length} episodes anyway (trusted series UUID ${series.id})`,
+      )
+      kept = episodes
     }
 
     console.log(`[discover]   Episodes ${episodes.length} → kept after LU/semester filter: ${kept.length}`)

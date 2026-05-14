@@ -32,21 +32,98 @@ const notion = new Client({ auth: process.env.NOTION_TOKEN })
 const LECTURES_DB = process.env.LECTURES_DS_ID!
 const SUBJECTS_DB = process.env.SUBJECTS_DS_ID!
 
+type LectureDbProp = { type: string }
+
+let lecturesDbPropertiesCache: Record<string, LectureDbProp> | null = null
+
+/** Retrieve and cache Lectures DB property schema (name → `{ type }`). */
+export async function getLecturesDatabaseProperties(): Promise<Record<string, LectureDbProp>> {
+  if (lecturesDbPropertiesCache) return lecturesDbPropertiesCache
+  const db = await notion.databases.retrieve({ database_id: LECTURES_DB })
+  lecturesDbPropertiesCache = db.properties as Record<string, LectureDbProp>
+  return lecturesDbPropertiesCache
+}
+
+/**
+ * Fail fast with actionable errors when `NOTION_LECTURES_*` names/types do not match the Notion database.
+ * Lists every column title and type so you can copy exact spellings into `.env`.
+ */
+export async function validateLecturesDatabaseConfig(): Promise<void> {
+  const props = await getLecturesDatabaseProperties()
+  const problems: string[] = []
+  const kind = lectureSubjectColumnKind()
+
+  const check = (columnTitle: string, want: string, envKey: string) => {
+    const p = props[columnTitle]
+    if (!p) {
+      problems.push(`No «${columnTitle}» column (want ${want}). Set ${envKey}=… to match your DB **exact title** (case-sensitive).`)
+      return
+    }
+    if (p.type !== want)
+      problems.push(`«${columnTitle}» exists but Notion type is «${p.type}», expected «${want}». Rename the column or point ${envKey} at a ${want} column.`)
+  }
+
+  check(LP.name, 'title', 'NOTION_LECTURES_NAME')
+  check(LP.lectureId, 'rich_text', 'NOTION_LECTURES_LECTURE_ID')
+  check(LP.courseId, kind, 'NOTION_LECTURES_COURSE_SUBJECT')
+  check(LP.watchUrl, 'url', 'NOTION_LECTURES_MEDIA_URL')
+  check(LP.status, 'select', 'NOTION_LECTURES_STATUS')
+  check(LP.skipReason, 'rich_text', 'NOTION_LECTURES_SKIP_REASON')
+
+  const statusProp = props[LP.status] as { type?: string; select?: { options?: Array<{ name: string }> } } | undefined
+  if (statusProp?.type === 'select') {
+    const names =
+      statusProp.select?.options?.map(o => o.name).filter((n): n is string => Boolean(n?.trim()))
+      ?? []
+    if (names.length > 0 && !names.includes('Discovered')) {
+      problems.push(
+        `Status column «${LP.status}» has no «Discovered» option. Existing options: ${names.join(', ')}.`,
+      )
+    }
+  }
+
+  if (problems.length === 0) return
+
+  const listing = Object.keys(props)
+    .sort()
+    .map(k => `  • "${k}" → ${props[k]!.type}`)
+    .join('\n')
+
+  throw new Error(
+    `${problems.join('\n')}\n\nActual columns on the Lectures database:\n${listing}\n\nFix: copy each column title above into NOTION_LECTURES_* vars in \`.env\` (see \`.env.example\`).`,
+  )
+}
+
 export async function fetchSubjects(): Promise<Subject[]> {
-  const response = await notion.databases.query({ database_id: SUBJECTS_DB })
-  return response.results.map((page: any) => ({
-    id: page.id,
-    notionPageId: page.id,
-    name: getTitle(page),
-    mediaCourseId:
-      getRichText(page, SP.mediaCourseId)
-      || getFormulaString(page, SP.mediaCourseId),
-    mediaSeriesId:
-      getRichText(page, SP.mediaSeriesId)
-      || getUrl(page, SP.mediaSeriesId)
-      || extractFormulaUuid(page, SP.mediaSeriesId),
-    glossary: getRichText(page, SP.glossary),
-  }))
+  const out: Subject[] = []
+  let cursor: string | undefined
+
+  do {
+    const response: any = await notion.databases.query({
+      database_id: SUBJECTS_DB,
+      start_cursor: cursor,
+    })
+
+    for (const page of response.results) {
+      out.push({
+        id: page.id,
+        notionPageId: page.id,
+        name: getTitle(page),
+        mediaCourseId:
+          getRichText(page, SP.mediaCourseId)
+          || getFormulaString(page, SP.mediaCourseId),
+        mediaSeriesId:
+          getRichText(page, SP.mediaSeriesId)
+          || getUrl(page, SP.mediaSeriesId)
+          || extractFormulaUuid(page, SP.mediaSeriesId),
+        glossary: getRichText(page, SP.glossary),
+      })
+    }
+
+    cursor = response.has_more ? response.next_cursor : undefined
+  } while (cursor)
+
+  return out
 }
 
 export async function fetchExistingLectures(): Promise<Map<string, Lecture>> {

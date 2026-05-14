@@ -1,7 +1,15 @@
 import { BudgetTracker } from './budget'
 import { discoverLecturesFromMedia } from './discover'
 import { cleanup, downloadAndConvert, getAudioDuration } from './download'
-import { fetchExistingLectures, fetchSubjects, setSkipReason, setStage, upsertLecture, writePostprocessResults } from './notion'
+import {
+  fetchExistingLectures,
+  fetchSubjects,
+  setSkipReason,
+  setStage,
+  upsertLecture,
+  validateLecturesDatabaseConfig,
+  writePostprocessResults,
+} from './notion'
 import { postprocess } from './postprocess'
 import { transcribe } from './transcribe'
 import {
@@ -67,9 +75,12 @@ function ensureGroqBudgetBeforeNewHeavyWork(budget: BudgetTracker, estimatedAudi
 async function main() {
   console.log('[lecture-rip] Starting pipeline...')
   console.log(`[lecture-rip] force_rerip=${FORCE}, course_filter=${COURSE_FILTER ?? '(none)'}`)
+  console.log(`[lecture-rip] MEDIA_SEMESTER=${(process.env.MEDIA_SEMESTER ?? '').trim() || '(unset → calendar default)'}`)
 
   const budget = await BudgetTracker.load()
   console.log(`[lecture-rip] Budget: ${budget.summary()}`)
+
+  await validateLecturesDatabaseConfig()
 
   const subjects = await fetchSubjects()
   console.log(`[lecture-rip] Found ${subjects.length} subjects`)
