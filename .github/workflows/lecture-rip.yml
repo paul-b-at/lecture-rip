@@ -1,0 +1,78 @@
+name: lecture-rip
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      course_filter:
+        description: 'Only process courses matching (regex)'
+        required: false
+        default: ''
+      force_rerip:
+        description: 'Re-rip lectures already at Done (resets their Status to Discovered first)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: lecture-rip
+  cancel-in-progress: false
+
+jobs:
+  rip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install deps
+        run: bun install --frozen-lockfile
+
+      - name: Restore pipeline cache
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: lecture-rip-state-v1
+
+      - name: Run pipeline
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          LECTURES_DS_ID: ${{ secrets.LECTURES_DS_ID }}
+          SUBJECTS_DS_ID: ${{ secrets.SUBJECTS_DS_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_DAILY_AUDIO_SECONDS: ${{ secrets.GROQ_DAILY_AUDIO_SECONDS }}
+          GROQ_HOURLY_AUDIO_SECONDS: ${{ secrets.GROQ_HOURLY_AUDIO_SECONDS }}
+          GROQ_DAILY_REQUESTS: ${{ secrets.GROQ_DAILY_REQUESTS }}
+          GROQ_INTER_CHUNK_MS: ${{ secrets.GROQ_INTER_CHUNK_MS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_DAILY_REQUESTS: ${{ secrets.GEMINI_DAILY_REQUESTS }}
+          MEDIA_BASE_URL: ${{ secrets.MEDIA_BASE_URL }}
+          MEDIA_SEMESTER: ${{ secrets.MEDIA_SEMESTER }}
+          MEDIA_SESSION_COOKIE: ${{ secrets.MEDIA_SESSION_COOKIE }}
+          COURSE_FILTER: ${{ inputs.course_filter }}
+          FORCE_RERIP: ${{ inputs.force_rerip }}
+        run: bun run src/index.ts
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-log-${{ github.run_id }}
+          path: |
+            logs/*.log
+            logs/*.json
+          retention-days: 14
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          curl -d "lecture-rip failed: run ${{ github.run_id }}" \
+            https://ntfy.sh/${{ secrets.NTFY_TOPIC }}

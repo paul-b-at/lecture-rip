@@ -1,0 +1,216 @@
+import { mkdir } from 'node:fs/promises'
+import type { BudgetState } from './types'
+
+const BUDGET_PATH = '.cache/budget.json'
+
+/** Decoded lecture audio capped per UTC **hour** bucket; default matches common Groq “per-hour” allotment (~2 hours of speech per rolling hour). Check console.groq.com for your plan. */
+const DEFAULT_GROQ_HOURLY_AUDIO_SECONDS = 7200
+const DEFAULT_GROQ_DAILY_REQUESTS = 200
+const DEFAULT_GEMINI_DAILY_REQUESTS = 500
+const DOWNSHIFT_THRESHOLD = 0.8
+
+function utcCalendarDay(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+/** e.g. `2026-05-14T19` UTC — decoded-audio bookkeeping rolls over each new hour */
+function utcHourBucket(): string {
+  return new Date().toISOString().slice(0, 13)
+}
+
+function parsedGroqHourlyAudioSecondsCap(): number {
+  if (typeof process === 'undefined') return DEFAULT_GROQ_HOURLY_AUDIO_SECONDS
+  const raw = process.env.GROQ_HOURLY_AUDIO_SECONDS?.trim()
+    ?? process.env.GROQ_HOUR_AUDIO_SECONDS?.trim()
+    ?? process.env.GROQ_DIALY_AUDIO_SECONDS?.trim()
+    ?? process.env.GROQ_DAILY_AUDIO_SECONDS?.trim()
+    ?? ''
+  if (!raw) return DEFAULT_GROQ_HOURLY_AUDIO_SECONDS
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_GROQ_HOURLY_AUDIO_SECONDS
+}
+
+function parsedGroqDailyRequestLimit(): number {
+  if (typeof process === 'undefined') return DEFAULT_GROQ_DAILY_REQUESTS
+  const raw = process.env.GROQ_DAILY_REQUESTS?.trim()
+    ?? process.env.GROQ_DIALY_REQUESTS?.trim()
+    ?? ''
+  if (!raw) return DEFAULT_GROQ_DAILY_REQUESTS
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_GROQ_DAILY_REQUESTS
+}
+
+function parsedGeminiDailyRequestLimit(): number {
+  if (typeof process === 'undefined') return DEFAULT_GEMINI_DAILY_REQUESTS
+  const raw = process.env.GEMINI_DAILY_REQUESTS?.trim()
+    ?? process.env.GEMINI_DIALY_REQUESTS?.trim()
+    ?? ''
+  if (!raw) return DEFAULT_GEMINI_DAILY_REQUESTS
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_GEMINI_DAILY_REQUESTS
+}
+
+function roundGroqSeconds(n: number): number {
+  return Math.max(0, Math.round(Number(n)))
+}
+
+const HOUR_BUCKET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}$/
+
+function migratePersistedBudget(raw: unknown): BudgetState {
+  const obj = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
+
+  let date =
+    typeof obj.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(obj.date)
+      ? obj.date
+      : utcCalendarDay()
+  let groqRequests = typeof obj.groqRequests === 'number' ? Math.max(0, Math.floor(obj.groqRequests)) : 0
+  let geminiRequests = typeof obj.geminiRequests === 'number' ? Math.max(0, Math.floor(obj.geminiRequests)) : 0
+
+  const today = utcCalendarDay()
+  if (date !== today) {
+    date = today
+    groqRequests = 0
+    geminiRequests = 0
+  }
+
+  const hourBucketNow = utcHourBucket()
+  let groqAudioHourUtc =
+    typeof obj.groqAudioHourUtc === 'string' && HOUR_BUCKET_RE.test(obj.groqAudioHourUtc)
+      ? obj.groqAudioHourUtc
+      : ''
+  let groqAudioSeconds = typeof obj.groqAudioSeconds === 'number' ? roundGroqSeconds(obj.groqAudioSeconds) : 0
+
+  if (!groqAudioHourUtc || groqAudioHourUtc !== hourBucketNow) {
+    groqAudioSeconds = 0
+    groqAudioHourUtc = hourBucketNow
+  }
+
+
+  return {
+    date,
+    groqAudioHourUtc,
+    groqAudioSeconds,
+    groqHourlyAudioLimit: parsedGroqHourlyAudioSecondsCap(),
+    groqRequests,
+    groqDailyRequestLimit: parsedGroqDailyRequestLimit(),
+    geminiRequests,
+    geminiDailyLimit: parsedGeminiDailyRequestLimit(),
+  }
+}
+
+function freshBudgetState(): BudgetState {
+  return {
+    date: utcCalendarDay(),
+    groqAudioHourUtc: utcHourBucket(),
+    groqAudioSeconds: 0,
+    groqHourlyAudioLimit: parsedGroqHourlyAudioSecondsCap(),
+    groqRequests: 0,
+    groqDailyRequestLimit: parsedGroqDailyRequestLimit(),
+    geminiRequests: 0,
+    geminiDailyLimit: parsedGeminiDailyRequestLimit(),
+  }
+}
+
+export class BudgetTracker {
+  private state: BudgetState
+
+  private constructor(state: BudgetState) {
+    this.state = state
+  }
+
+  static async load(): Promise<BudgetTracker> {
+    await mkdir('.cache', { recursive: true })
+    const file = Bun.file(BUDGET_PATH)
+
+    if (await file.exists()) {
+      try {
+        const raw: unknown = await file.json()
+        return new BudgetTracker(migratePersistedBudget(raw))
+      } catch {
+        return new BudgetTracker(freshBudgetState())
+      }
+    }
+
+    return new BudgetTracker(freshBudgetState())
+  }
+
+  async save(): Promise<void> {
+    this.state.groqAudioSeconds = roundGroqSeconds(this.state.groqAudioSeconds)
+    await Bun.write(BUDGET_PATH, JSON.stringify(this.state, null, 2))
+  }
+
+  /** Reconcile env caps with disk state (handles long-running scripts crossing UTC midnight or hour) */
+  tickClock(): void {
+    const today = utcCalendarDay()
+    const hourBucket = utcHourBucket()
+    const hourlyLimit = parsedGroqHourlyAudioSecondsCap()
+    const groqReqLimit = parsedGroqDailyRequestLimit()
+    const gemLimit = parsedGeminiDailyRequestLimit()
+
+    if (this.state.date !== today) {
+      this.state.date = today
+      this.state.groqRequests = 0
+      this.state.geminiRequests = 0
+    }
+
+    if (this.state.groqAudioHourUtc !== hourBucket) {
+      this.state.groqAudioHourUtc = hourBucket
+      this.state.groqAudioSeconds = 0
+    }
+
+    this.state.groqHourlyAudioLimit = hourlyLimit
+    this.state.groqDailyRequestLimit = groqReqLimit
+    this.state.geminiDailyLimit = gemLimit
+  }
+
+  shouldDownshiftGroq(): boolean {
+    this.tickClock()
+    return this.state.groqAudioSeconds >= this.state.groqHourlyAudioLimit * DOWNSHIFT_THRESHOLD
+  }
+
+  canAffordGroq(estimatedSeconds: number): boolean {
+    this.tickClock()
+    return this.state.groqAudioSeconds + estimatedSeconds <= this.state.groqHourlyAudioLimit
+  }
+
+  canAffordGroqRequest(): boolean {
+    this.tickClock()
+    return this.state.groqRequests < this.state.groqDailyRequestLimit
+  }
+
+  canAffordGemini(): boolean {
+    this.tickClock()
+    return this.state.geminiRequests < this.state.geminiDailyLimit
+  }
+
+  recordGroqUsage(audioSeconds: number): void {
+    this.tickClock()
+    this.state.groqAudioSeconds = roundGroqSeconds(this.state.groqAudioSeconds + audioSeconds)
+  }
+
+  recordGroqRequest(): void {
+    this.tickClock()
+    this.state.groqRequests++
+  }
+
+  recordGeminiUsage(): void {
+    this.tickClock()
+    this.state.geminiRequests++
+  }
+
+  get groqRemaining(): number {
+    this.tickClock()
+    return Math.max(0, this.state.groqHourlyAudioLimit - this.state.groqAudioSeconds)
+  }
+
+  get geminiRemaining(): number {
+    this.tickClock()
+    return Math.max(0, this.state.geminiDailyLimit - this.state.geminiRequests)
+  }
+
+  summary(): string {
+    this.tickClock()
+    const g = Math.round(this.state.groqAudioSeconds)
+    return `Groq: ${g}s / ${this.state.groqHourlyAudioLimit}s (UTC hour ${this.state.groqAudioHourUtc}), ${this.state.groqRequests}/${this.state.groqDailyRequestLimit} Whisper reqs/day | Gemini: ${this.state.geminiRequests} / ${this.state.geminiDailyLimit} reqs/day`
+  }
+}
