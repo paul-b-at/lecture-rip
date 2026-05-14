@@ -3,6 +3,12 @@ import { getMediaCookieHeader } from './media-session'
 /** OpenCast engage search JSON on JKU media. */
 export const DEFAULT_MEDIA_BASE = 'https://media.jku.at'
 
+/** Missing GitHub Secrets inject `ENV=""` — `??` does not fall back; treat empty / whitespace as unset. */
+export function normalizeMediaBase(raw?: string | null): string {
+  const t = typeof raw === 'string' ? raw.trim() : ''
+  return (t ? t : DEFAULT_MEDIA_BASE).replace(/\/+$/, '')
+}
+
 /** Same-origin fetches against `media.jku.at`; cookie from `#MEDIA_SESSION_COOKIE` or Playwright `#MEDIA_PLAYWRIGHT_STATE`. */
 export function mediaFetch(url: string): Promise<Response> {
   const ck = getMediaCookieHeader()
@@ -132,7 +138,7 @@ export async function resolveSeriesForSubject(opts: {
   mediaCourseId: string
   mediaSeriesIdHint?: string
 }): Promise<SeriesHit | null> {
-  const base = (opts.baseUrl ?? DEFAULT_MEDIA_BASE).replace(/\/+$/, '')
+  const base = normalizeMediaBase(opts.baseUrl)
   const pinned = parseUuid(opts.mediaSeriesIdHint)
   if (pinned) return { id: pinned, title: '(pinned Media Series ID)' }
 
@@ -247,7 +253,7 @@ function coerceTracks(media: unknown): TrackLike[] {
 }
 
 export async function fetchEpisodesForSeries(baseUrl: string | undefined, seriesId: string): Promise<MediaEpisode[]> {
-  const base = (baseUrl ?? DEFAULT_MEDIA_BASE).replace(/\/+$/, '')
+  const base = normalizeMediaBase(baseUrl)
   const episodes: MediaEpisode[] = []
 
   let offset = 0
@@ -294,7 +300,7 @@ export async function fetchEpisodeMediapackageById(
   baseUrl: string | undefined,
   mediapackageId: string,
 ): Promise<{ episode: MediaEpisode; seriesId: string; seriestitle: string } | null> {
-  const base = (baseUrl ?? DEFAULT_MEDIA_BASE).replace(/\/+$/, '')
+  const base = normalizeMediaBase(baseUrl)
   const u = new URL(`${base}/search/episode.json`)
   u.searchParams.set('limit', '5')
   u.searchParams.set('offset', '0')
@@ -324,7 +330,7 @@ export async function fetchEpisodeMediapackageById(
 }
 
 export function lecturePageUrl(episodeId: string, baseUrl?: string): string {
-  const base = (baseUrl ?? DEFAULT_MEDIA_BASE).replace(/\/+$/, '')
+  const base = normalizeMediaBase(baseUrl)
   return `${base}/play/${episodeId}`
 }
 

@@ -1,6 +1,6 @@
 import type { Lecture, Subject } from './types'
 import {
-  DEFAULT_MEDIA_BASE,
+  normalizeMediaBase,
   extractEpisodeHintUuid,
   fetchEpisodeMediapackageById,
   fetchEpisodesForSeries,
@@ -43,14 +43,14 @@ export async function discoverLecturesFromMedia(
   },
 ): Promise<DiscoveredLecture[]> {
   const filterRegex = opts.courseFilterRegex ? new RegExp(opts.courseFilterRegex, 'i') : null
-  const base = opts.baseUrl ?? process.env.MEDIA_BASE_URL ?? DEFAULT_MEDIA_BASE
+  const base = normalizeMediaBase(opts.baseUrl ?? process.env.MEDIA_BASE_URL)
 
   let semester = (opts.semesterOverride ?? '').trim() || (process.env.MEDIA_SEMESTER ?? '').trim()
 
   if (/^auto$/i.test(semester)) semester = ''
   if (!semester) semester = defaultJkuMediaSemester()
 
-  console.log(`[discover] media.jku.at  semester=${semester}  base=${base.replace(/\/+$/, '')}`)
+  console.log(`[discover] media.jku.at  semester=${semester}  base=${base}`)
 
   const discovered: DiscoveredLecture[] = []
 
