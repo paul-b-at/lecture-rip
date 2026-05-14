@@ -38,9 +38,9 @@ Semester tagging follows OpenCast: **`YYYYW`** (Wintersemester roughly Oct–Feb
 
 To capture logs, use `bun run start:tee` (creates `logs/`, then runs with `bash -o pipefail` so if `bun` fails, the script’s exit code reflects that—not just `tee`).
 
-Optional env: `MEDIA_BASE_URL`, `MEDIA_SEMESTER`, `MEDIA_SEMESTER_TZ`, `MEDIA_RESOLVE_LOOSE_LU`, `COURSE_FILTER`, `MEDIA_SESSION_COOKIE`, `MEDIA_PLAYWRIGHT_STATE`.
+Optional env: `MEDIA_BASE_URL`, `MEDIA_SEMESTER`, `MEDIA_SEMESTER_TZ`, `MEDIA_RESOLVE_LOOSE_LU`, `MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK`, `COURSE_FILTER`, `MEDIA_SESSION_COOKIE`, `MEDIA_PLAYWRIGHT_STATE`.
 
-**Discovery finds 0 lectures:** (1) Each Subject row needs **Media Course ID** (full series name like `2026S344090`, LU-only digits paired with **`MEDIA_SEMESTER`**, or a watch/play URL hint) **or** **Media Series ID** (series UUID). (2) **Notion column names** must match (override with **`NOTION_SUBJECTS_*`**). (3) **`COURSE_FILTER`** can exclude every Subject. (4) Anonymous **`/search/`** may omit your course — set **`MEDIA_SESSION_COOKIE`** from a logged-in browser or paste the **series UUID**. (5) If you store **LU-only** IDs, discovery walks **neighbor semesters** but **prefers your calendar/`MEDIA_SEMESTER` OpenCast prefix** (`2026S…`) when several terms share the LU; use a **full OpenCast key** (`2026S344090`) or pin **`MEDIA_SEMESTER`** when the wrong term is chosen. Loose LU substring guessing is **`MEDIA_RESOLVE_LOOSE_LU`** (default off — wrong-semester traps).
+**Discovery finds 0 lectures:** (1) Each Subject row needs **Media Course ID** (full series name like `2026S344090`, LU-only digits paired with **`MEDIA_SEMESTER`**, or a watch/play URL hint) **or** **Media Series ID** (series UUID). (2) **Notion column names** must match (override with **`NOTION_SUBJECTS_*`**). (3) **`COURSE_FILTER`** can exclude every Subject. (4) Anonymous **`/search/`** may omit your course — set **`MEDIA_SESSION_COOKIE`** from a logged-in browser or paste the **series UUID**. (5) If you store **LU-only** IDs, discovery scans neighbor terms but **keeps series only when the OpenCast title matches** your anchor (`2026S`+LU, etc.); **`MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK=true`** re‑enables reuse of older terms (e.g. last WS). Loose LU substring guesses: **`MEDIA_RESOLVE_LOOSE_LU`** (default off).
 
 Some courses stay out of **anonymous** `/search/` results (nothing matches `2026S…344090`). Paella relies on `/search/episode.json?id=` with your browser cookies.
 
@@ -106,6 +106,7 @@ Uses **`ubuntu-latest`** with **`paths: .cache`** cache key `lecture-rip-state-v
 | `MEDIA_SEMESTER` | *(optional)* e.g. `2026S`; leave empty/`auto` for inferred term |
 | `MEDIA_SEMESTER_TZ` | *(optional)* IANA zone for auto semester (default **`Europe/Vienna`** on empty secret) |
 | `MEDIA_RESOLVE_LOOSE_LU` | *(optional)* opt-in LU substring heuristic when strict search stays empty (**risk**: wrong semester) |
+| `MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK` | *(optional)* `true` to use last-winter series when current-term OpenCast title missing (default omit = strict) |
 
 Notion column-title overrides (**`NOTION_LECTURES_*`**, **`NOTION_SUBJECTS_*`**) mirror `.env`; set them under **Repository → Settings → Secrets and variables → Actions** so CI matches local `.env`.
 

@@ -70,6 +70,7 @@ jobs:
           MEDIA_SEMESTER: ${{ secrets.MEDIA_SEMESTER }}
           MEDIA_SEMESTER_TZ: ${{ secrets.MEDIA_SEMESTER_TZ }}
           MEDIA_RESOLVE_LOOSE_LU: ${{ secrets.MEDIA_RESOLVE_LOOSE_LU }}
+          MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK: ${{ secrets.MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK }}
           MEDIA_SESSION_COOKIE: ${{ secrets.MEDIA_SESSION_COOKIE }}
           COURSE_FILTER: ${{ inputs.course_filter }}
           FORCE_RERIP: ${{ inputs.force_rerip }}

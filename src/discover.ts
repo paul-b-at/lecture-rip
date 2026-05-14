@@ -17,6 +17,13 @@ function envMediaResolveLooseLuBool(): boolean {
   return raw === '1' || raw === 'true' || raw === 'yes'
 }
 
+/** If false (default), LU-only discovery only keeps series whose OpenCast title matches anchor `YYYY[SW]{LU}` — no silent fallback to an older term. */
+function envAllowOlderSemLuFallback(): boolean {
+  const raw =
+    typeof process !== 'undefined' ? (process.env.MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK ?? '').trim().toLowerCase() : ''
+  return raw === '1' || raw === 'true' || raw === 'yes'
+}
+
 type ResolvedSeriesHit = NonNullable<Awaited<ReturnType<typeof resolveSeriesForSubject>>>
 
 /** Probe each ladder semester once; dedup by OpenCast series UUID, keep insertion order (ladder-first). */
@@ -48,8 +55,8 @@ async function collectLuSeriesCandidatesAcrossLadder(
 }
 
 /**
- * Prefer the hit whose ladder semester equals `anchorSem`, else one whose OpenCast series title prefixes
- * `{anchorSem}{lu}`, else the first ladder match (typically an older WS term vs calendar SS — warn once).
+ * Prefer OpenCast series whose **title** matches `{anchorSem}{LU}` (current term). If none, only fall back to
+ * older ladder matches when **`MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK=true`**.
  */
 function pickPreferredLuSeries(
   anchorSem: string,
@@ -58,27 +65,40 @@ function pickPreferredLuSeries(
 ): { sem: string; hit: ResolvedSeriesHit } | null {
   if (ordered.length === 0) return null
 
-  const byAnchoredSem = ordered.find(({ sem }) => sem === anchorSem)
-  if (byAnchoredSem) return byAnchoredSem
+  const anchorTitleMatches = ordered.filter(({ hit }) =>
+    seriesTitlesMatch(hit.title.trim(), anchorSem, luDigits),
+  )
 
-  const byAnchoredTitle = ordered.find(({ hit }) => seriesTitlesMatch(hit.title.trim(), anchorSem, luDigits))
-  if (byAnchoredTitle) return byAnchoredTitle
-
-  if (ordered.length > 1) {
-    const titles = ordered.map(({ hit }) => hit.title.trim()).slice(0, 4)
-    console.warn(
-      `[discover]   LU ${luDigits}: ${ordered.length} OpenCast series match across semesters (${titles.join(' · ')}…); `
-        + `picking ladder-first («${ordered[0]!.hit.title}», ${ordered[0]!.sem}). Set full Media Course ID (e.g. ${anchorSem}${luDigits}) or **MEDIA_SEMESTER**.`,
-    )
-  }
-  else {
-    console.warn(
-      `[discover]   LU ${luDigits}: only «${ordered[0]!.hit.title}» matched (semester ${ordered[0]!.sem}); `
-        + `anchor was ${anchorSem}. Set **MEDIA_SEMESTER** or full OpenCast key if this is wrong.`,
-    )
+  if (anchorTitleMatches.length > 0) {
+    const exactLadder = anchorTitleMatches.find(({ sem }) => sem === anchorSem)
+    return exactLadder ?? anchorTitleMatches[0]!
   }
 
-  return ordered[0] ?? null
+  if (envAllowOlderSemLuFallback()) {
+    const byAnchoredSem = ordered.find(({ sem }) => sem === anchorSem)
+    if (byAnchoredSem) return byAnchoredSem
+
+    if (ordered.length > 1) {
+      const titles = ordered.map(({ hit }) => hit.title.trim()).slice(0, 4)
+      console.warn(
+        `[discover]   LU ${luDigits}: ${ordered.length} older-term OpenCast series (${titles.join(' · ')}…); `
+          + `picking ladder-first («${ordered[0]!.hit.title}», ${ordered[0]!.sem}) because MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK=true.`,
+      )
+    }
+    else {
+      console.warn(
+        `[discover]   LU ${luDigits}: using «${ordered[0]!.hit.title}» (${ordered[0]!.sem}) — no title match for anchor ${anchorSem}.`,
+      )
+    }
+    return ordered[0] ?? null
+  }
+
+  const samples = ordered.map(({ hit, sem }) => `${hit.title.trim()} (${sem})`).slice(0, 3).join(' · ')
+  console.warn(
+    `[discover]   LU ${luDigits}: anchor ${anchorSem} has no OpenCast series title match (only: ${samples}). `
+      + `Skipped. Use full **Media Course ID** (e.g. ${anchorSem}${luDigits}), pin **Media Series ID**, or set **MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK=true** to allow older terms.`,
+  )
+  return null
 }
 
 export interface DiscoveredLecture {
@@ -102,7 +122,7 @@ function parseUuid(raw: string): string | null {
  * Each Notion Subject needs **Media Course ID** (series name like `2026S344090`, LU digits only, or Engage/play URL),
  * and/or **Media Series ID** (OpenCast UUID). Anonymous discovery may lag ACL; **`MEDIA_SESSION_COOKIE`** aligns with Paella.
  * Calendar `MEDIA_SEMESTER` is ignored when the series name embeds `YYYYW|YYYYS`.
- * LU-only rows scan **neighbor semesters**, collect matches, and **prefer** the anchor from **`semesterAnchorForPipeline`** (explicit `MEDIA_SEMESTER` when set, otherwise JKU/OpenCast rules in **`MEDIA_SEMESTER_TZ`**, default Vienna). Loose substring LU matching is opt-in (`MEDIA_RESOLVE_LOOSE_LU`).
+ * LU-only rows prefer series whose OpenCast **title** matches the anchor term (`2026S`+LU). Older terms (e.g. `2025W…`) are skipped unless **`MEDIA_LU_ALLOW_OLDER_SEM_FALLBACK=true`**.
  */
 export async function discoverLecturesFromMedia(
   subjects: Subject[],
