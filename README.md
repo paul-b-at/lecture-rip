@@ -1,8 +1,20 @@
 # lecture-rip
 
-AI lecture transcriber for JKU — **GitHub Actions runs hourly** (`0 * * * *` UTC): discovers episodes on [media.jku.at](https://media.jku.at), transcribes with Groq Whisper, post-processes with Gemini 2.5 Flash, writes structured notes to Notion. **`actions/cache`** keeps `.cache/budget.json` and transcripts across runs.
+AI lecture transcriber for JKU — **GitHub Actions runs hourly** (`0 * * * *` UTC): discovers episodes on [media.jku.at](https://media.jku.at), transcribes with **Groq Whisper** (with **Gemini audio** fallback), post-processes with **Gemini**, writes structured notes to Notion. **`actions/cache`** keeps `.cache/budget.json` and transcripts across runs.
 
-**Quota / resume:** When Groq *hourly decoded-audio* or *daily Whisper-request* caps (or Gemini *daily requests*) hit, the run exits **without** mass-marking lectures `Skipped`—each lecture stays on its last good **Status** (`Discovered`, `Downloaded`, `Transcribed`, …) and the **next hourly run** continues where it left off.
+**Quota / resume:** When Groq’s *hourly*, *daily decoded-audio*, or *daily Whisper-request* caps bite, or Gemini *postprocess / audio* counters — or the **combined** real Gemini API daily limit — blocks work, the run exits **without** mass-marking lectures `Skipped`; the **next hourly run** continues where it left off.
+
+**Transcription fallback:** If Groq cannot cover a lecture (hourly or daily audio, or daily Whisper requests), the pipeline uses **Gemini 2.5 Flash** on the same `GEMINI_API_KEY` for that lecture’s audio chunks. Segment timestamps may be less precise than Whisper.
+
+| Local counter / env | Default | Provider reference |
+|---------------------|---------|-------------------|
+| Groq audio / UTC **hour** (`GROQ_HOURLY_AUDIO_SECONDS`) | 7200 s | Groq ASH ≈ 7200 s/h (whisper-large-v3) |
+| Groq audio / UTC **day** (`GROQ_DAILY_AUDIO_SECONDS`) | 28800 s | Groq ASD ≈ 28800 s/day |
+| Groq Whisper requests / day (`GROQ_DIALY_REQUESTS` / `GROQ_DAILY_REQUESTS`) | 2000 | Groq RPD = 2000 |
+| Gemini **postprocess** requests / day (`GEMINI_DAILY_REQUESTS`) | 300 | Logical carve-out; Google enforces one **per-project** RPD pool |
+| Gemini-**audio** requests / day (`GEMINI_AUDIO_DAILY_REQUESTS`) | 200 | Same pool as postprocess — tune so sum ≤ your real Gemini RPD |
+
+`GROQ_DIALY_AUDIO_SECONDS` (typo alias) still affects **hourly** cap only. **`GROQ_DAILY_AUDIO_SECONDS` is now daily decoded-audio** (not an alias for hourly).
 
 ![lecture-rip](https://github.com/paul-b-at/lecture-rip/actions/workflows/lecture-rip.yml/badge.svg)
 
@@ -10,8 +22,8 @@ AI lecture transcriber for JKU — **GitHub Actions runs hourly** (`0 * * * *` U
 
 - **Runtime:** Bun + TypeScript
 - **Discovery:** `https://media.jku.at/search/series.json` + `/search/episode.json` (no Moodle login)
-- **Transcription:** Groq Whisper (`whisper-large-v3`) — local bookkeeping in `.cache/budget.json`: **decoded audio seconds per UTC hour bucket** (`GROQ_HOURLY_AUDIO_SECONDS` or legacy **`GROQ_DAILY_AUDIO_SECONDS`**, default **7200** ≈ **2 hours** of lecture audio **that Groq hour**; counter resets when the UTC clock hour changes). **Whisper API call count** is still **per UTC calendar day** (`GROQ_DIALY_REQUESTS` / `GROQ_DAILY_REQUESTS`, default `200`).
-- **Postprocessing:** Gemini 2.5 Flash (JSON schema mode) — **`GEMINI_DAILY_REQUESTS`** (alias **`GEMINI_DIALY_REQUESTS`**, default `500`) caps **`generateContent`** calls per day (each validation retry or fallback model is another request).
+- **Transcription:** Primary Groq Whisper (`whisper-large-v3`); per-lecture fallback Gemini Flash audio (`GEMINI_AUDIO_MODEL`, default `gemini-2.5-flash`) when Groq quotas are insufficient.
+- **Postprocessing:** Gemini (model chain in [`src/postprocess.ts`](src/postprocess.ts)); local daily caps split between `GEMINI_DAILY_REQUESTS` (postprocess) and `GEMINI_AUDIO_DAILY_REQUESTS` (audio STT fallback) — both draw from the same Gemini **per-project** RPD at Google.
 - **Storage:** Notion (Lectures DB + Subjects DB)
 - **CI:** GitHub Actions hourly (`cron: 0 * * * *`; ~24 short runs/day on the free tier)
 
@@ -24,7 +36,7 @@ AI lecture transcriber for JKU — **GitHub Actions runs hourly** (`0 * * * *` U
 | `Name` | title | subject label (used by `COURSE_FILTER` regex); the runner does **not** read any separate “Course” column on Subjects |
 | **`Media Course ID`** | rich text (*or formula string*) | **OpenCast series name** as shown on media.jku.at (`2026S344090`, `2025W338002`, `2025W338002/4/…`). You can alternatively store **LU digits only** (`344090`); those are paired with `MEDIA_SEMESTER`/calendar semantics. Digit-only formulas that concatenate year+LU (`2026344090`) are normalized by stripping one leading `YYYY`. You can also paste a **watch / Engage URL** (`…/paella7/ui/watch.html?id=…`, `…/play/<uuid>`, `…&epFrom=<uuid>`); discovery loads that mediapackage via `/search/episode.json?id=…` and then follows its **series** id. |
 | **`Media Series ID`** | optional text / URL / formula | paste OpenCast **series UUID** to pin — skips ambiguous search |
-| `Glossary` | rich text | passed to Whisper as `prompt` |
+| `Glossary` | rich text | passed to Whisper / Gemini audio as context |
 
 **Lectures** — expected fields: title (`Name` by default), `Lecture ID` (rich text, episode UUID), **link to Subject** (`Course ID` rich-text UUID **or** relation **Subjects** column), **`Moodle URL`** (URL), `Status` (select), `Skip Reason`. Omit any extra **Course** title column—the Subject relation (or Subject uuid) identifies the course. The Gemini summary is on the lecture **page body** (blocks). Rename columns via `NOTION_LECTURES_*` (see `.env.example`). **`NOTION_LECTURES_SUBJECT_KIND=relation`** when the Subject column is a relation. If env names are omitted in CI (empty Actions secrets), the runner infers **`JKU Lecture ID`**, relation **`Subjects`**, and **`Source URL`** when those exact columns exist.
 
@@ -95,10 +107,13 @@ Uses **`ubuntu-latest`** with **`paths: .cache`** cache key `lecture-rip-state-v
 | `NOTION_SUBJECTS_GLOSSARY` | *(optional)* Subjects glossary column |
 | `GROQ_API_KEY` | Groq API key |
 | `GEMINI_API_KEY` | Gemini API key |
-| `GROQ_HOURLY_AUDIO_SECONDS` | *(optional)* local cap on **decoded audio seconds per UTC hour** (default **`7200` ≈ 2h content** in that hour bucket; Groq-style rolling hour). Legacy secret name `GROQ_DAILY_AUDIO_SECONDS` still works as the same numeric cap for this **hourly** tally |
-| `GROQ_DIALY_REQUESTS` / `GROQ_DAILY_REQUESTS` | *(optional)* Whisper **requests per UTC calendar day** (default `200`) |
-| `GROQ_INTER_CHUNK_MS` | *(optional)* delay between chunk requests (`transcribe`); helps avoid Groq TPM/burst **429**s on multi-chunk opus files |
-| `GEMINI_DAILY_REQUESTS` | *(optional)* local daily cap on **Gemini `generateContent`** calls (default `500`) |
+| `GROQ_HOURLY_AUDIO_SECONDS` | *(optional)* cap on **decoded audio seconds per UTC hour** (default **`7200`**). |
+| `GROQ_DAILY_AUDIO_SECONDS` | *(optional)* cap on **decoded audio seconds per UTC calendar day** (default **`28800`**; mirrors Groq ASD). **Breaking:** this is no longer an alias for the hourly cap — use `GROQ_HOURLY_AUDIO_SECONDS` for that. |
+| `GROQ_DIALY_REQUESTS` / `GROQ_DAILY_REQUESTS` | *(optional)* Whisper **requests per UTC day** (default **`2000`**) |
+| `GROQ_INTER_CHUNK_MS` | *(optional)* delay between chunk requests (`transcribe`); helps avoid Groq burst **429**s on multi-chunk opus files |
+| `GEMINI_DAILY_REQUESTS` | *(optional)* local daily cap on **postprocess** `generateContent` (default **`300`**) |
+| `GEMINI_AUDIO_DAILY_REQUESTS` | *(optional)* local daily cap on **Gemini audio transcribe fallback** calls (default **`200`**) — same Gemini project pool as above |
+| `GEMINI_AUDIO_MODEL` | *(optional)* model id for audio STT fallback (default **`gemini-2.5-flash`**) |
 | `NTFY_TOPIC` | ntfy topic for failures |
 | `MEDIA_BASE_URL` | *(optional)* default `https://media.jku.at` |
 | `MEDIA_SESSION_COOKIE` | *(optional)* full `Cookie` header for MEDIA_BASE_URL; use when ACL blocks anonymous `/search/` |

@@ -66,6 +66,8 @@ jobs:
           GROQ_INTER_CHUNK_MS: ${{ secrets.GROQ_INTER_CHUNK_MS }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_DAILY_REQUESTS: ${{ secrets.GEMINI_DAILY_REQUESTS }}
+          GEMINI_AUDIO_DAILY_REQUESTS: ${{ secrets.GEMINI_AUDIO_DAILY_REQUESTS }}
+          GEMINI_AUDIO_MODEL: ${{ secrets.GEMINI_AUDIO_MODEL }}
           MEDIA_BASE_URL: ${{ secrets.MEDIA_BASE_URL }}
           MEDIA_SEMESTER: ${{ secrets.MEDIA_SEMESTER }}
           MEDIA_SEMESTER_TZ: ${{ secrets.MEDIA_SEMESTER_TZ }}

@@ -91,13 +91,20 @@ export interface BudgetState {
   groqAudioHourUtc: string
   /** Groq decoded-audio seconds used in the current UTC hour bucket */
   groqAudioSeconds: number
-  /** Hourly cap (`GROQ_HOURLY_AUDIO_SECONDS` and legacy aliases; default `7200` ≈ 2 hours audio per UTC hour) */
+  /** Hourly cap (`GROQ_HOURLY_AUDIO_SECONDS`; default `7200` ≈ 2h audio per UTC hour; mirrors Groq ASH) */
   groqHourlyAudioLimit: number
+  /** Groq decoded-audio seconds used this UTC calendar day (mirrors Groq ASD) */
+  groqAudioSecondsToday: number
+  /** Daily decoded-audio cap (`GROQ_DAILY_AUDIO_SECONDS`; default `28800` ≈ 8h/day) */
+  groqDailyAudioLimit: number
   /** Whisper `transcriptions.create` calls this UTC calendar day */
   groqRequests: number
   groqDailyRequestLimit: number
   geminiRequests: number
   geminiDailyLimit: number
+  /** `generateContent` calls this UTC day for Gemini-audio transcribe fallback only */
+  geminiAudioRequests: number
+  geminiAudioDailyLimit: number
 }
 
 export type QuotaResumeAfter = 'utc_hour' | 'utc_midnight'
