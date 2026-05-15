@@ -187,8 +187,7 @@ async function processLecture(
 
     const audioSeconds = await getAudioDuration(audioPath)
 
-    const groqCovers = budget.groqCoversTranscription(audioSeconds)
-    const provider: TranscribeProvider = groqCovers ? 'groq' : 'gemini'
+    let provider: TranscribeProvider = budget.groqCoversTranscription(audioSeconds) ? 'groq' : 'gemini'
 
     if (provider === 'gemini') {
       console.log('[lecture-rip] Groq quota tight — using Gemini audio for this lecture')
@@ -204,14 +203,27 @@ async function processLecture(
     const tier = provider === 'groq' && budget.shouldDownshiftGroq() ? 'fast' : 'best'
     if (tier === 'fast') console.log(`[lecture-rip] Budget pressure — using whisper-large-v3-turbo`)
 
-    await transcribe(audioPath, lec.id, {
-      glossary: lec.glossary,
-      tier,
-      budget,
-      provider,
-    })
+    try {
+      await transcribe(audioPath, lec.id, {
+        glossary: lec.glossary,
+        tier,
+        budget,
+        provider,
+      })
+    } catch (e: unknown) {
+      if (provider === 'groq' && isQuotaError(e) && budget.canAffordGeminiAudio()) {
+        console.warn(`[lecture-rip] Groq 429 mid-transcribe — falling back to Gemini audio`)
+        provider = 'gemini'
+        await transcribe(audioPath, lec.id, {
+          glossary: lec.glossary,
+          budget,
+          provider: 'gemini',
+        })
+      } else {
+        throw e
+      }
+    }
     if (provider === 'groq') {
-      /** Bill decoded audio duration (matches `canAfford`); Groq chunk `duration` fields are unreliable summed. */
       budget.recordGroqUsage(audioSeconds)
     }
     await budget.save()
