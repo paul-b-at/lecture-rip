@@ -9,8 +9,15 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
 const CACHE_DIR = '.cache/transcripts'
 const MAX_RETRIES = 5
-/** Gemini inlineData limit is 100 MB (base64-encoded) since Jan 2026. Leave a small margin. */
-const GEMINI_INLINE_MAX_MB = 96
+/**
+ * Gemini inlineData limit is 100 MB (base64-encoded) since Jan 2026, but the
+ * **output token limit** (~65K tokens on Flash) is the real constraint: a full
+ * lecture transcript as structured JSON can easily exceed it and get truncated.
+ * At 32kbps opus, ~10 min of audio ≈ 2.4 MB and produces a manageable transcript.
+ * Cap at 20 MB ≈ ~80 min at 32kbps — comfortably under the output limit for most
+ * content while avoiding excessive chunking.
+ */
+const GEMINI_INLINE_MAX_MB = 20
 /** 5 minutes — large base64 audio payloads on CI runners need time to upload + process. */
 const GEMINI_AUDIO_TIMEOUT_MS = 5 * 60 * 1000
 
@@ -276,6 +283,12 @@ async function transcribeGeminiChunk(
       )
 
       opts.budget?.recordGeminiAudioRequest()
+
+      const candidate = result.response.candidates?.[0]
+      const finishReason = candidate?.finishReason
+      if (finishReason === 'MAX_TOKENS') {
+        throw new Error(`Gemini response truncated (finishReason=${finishReason}) — audio chunk too long for output token limit`)
+      }
 
       const text = stripJsonFence(result.response.text())
       const parsed = JSON.parse(text) as {
