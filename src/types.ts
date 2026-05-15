@@ -43,6 +43,34 @@ export interface Subject {
   glossary: string
 }
 
+const examHintPriority = z.enum(['likely', 'tricky', 'general'])
+
+/** Gemini `responseSchema` uses `{ hint, priority }` items; older runs or manual JSON may use plain strings. */
+function normalizeExamHints(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      const t = item.trim()
+      if (t) out.push(t)
+      continue
+    }
+    if (item && typeof item === 'object') {
+      const o = item as Record<string, unknown>
+      const hintRaw = o.hint
+      const hint = typeof hintRaw === 'string' ? hintRaw.trim() : ''
+      if (!hint) continue
+      let tag: 'likely' | 'tricky' | 'general' | null = null
+      if (typeof o.priority === 'string') {
+        const pr = examHintPriority.safeParse(o.priority.trim().toLowerCase())
+        if (pr.success) tag = pr.data
+      }
+      out.push(tag != null ? `[${tag}] ${hint}` : hint)
+    }
+  }
+  return out
+}
+
 export const PostprocessOutputSchema = z.object({
   summary: z.string(),
   chapters: z.array(z.object({
@@ -50,7 +78,7 @@ export const PostprocessOutputSchema = z.object({
     end: z.string(),
     title: z.string(),
   })),
-  examHints: z.array(z.string()),
+  examHints: z.preprocess(normalizeExamHints, z.array(z.string())),
   actionItems: z.array(z.string()),
 })
 
