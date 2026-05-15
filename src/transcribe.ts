@@ -10,6 +10,8 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 const CACHE_DIR = '.cache/transcripts'
 const MAX_RETRIES = 5
 const GEMINI_INLINE_MAX_MB = 16
+/** 5 minutes — large base64 audio payloads on CI runners need time to upload + process. */
+const GEMINI_AUDIO_TIMEOUT_MS = 5 * 60 * 1000
 
 const GEMINI_AUDIO_RESPONSE_SCHEMA = {
   type: SchemaType.OBJECT,
@@ -267,10 +269,10 @@ async function transcribeGeminiChunk(
       })
 
       const inline = await geminiInlineData(chunkPath)
-      const result = await model.generateContent([
-        { text: userText },
-        { inlineData: inline },
-      ])
+      const result = await model.generateContent(
+        [{ text: userText }, { inlineData: inline }],
+        { timeout: GEMINI_AUDIO_TIMEOUT_MS },
+      )
 
       opts.budget?.recordGeminiAudioRequest()
 
@@ -297,12 +299,22 @@ async function transcribeGeminiChunk(
       const err = e as { status?: number; message?: string }
       const msg = String(err?.message ?? e)
 
-      if (err?.status === 429 || msg.includes('429') || msg.toLowerCase().includes('quota')) {
+      const is429 = err?.status === 429 || msg.includes('429') || msg.toLowerCase().includes('quota')
+      const isTransient = err?.status === 503
+        || msg.toLowerCase().includes('timed out')
+        || msg.toLowerCase().includes('timeout')
+        || msg.toLowerCase().includes('econnreset')
+        || msg.toLowerCase().includes('socket hang up')
+        || msg.toLowerCase().includes('network')
+        || msg.toLowerCase().includes('unavailable')
+
+      if (is429 || isTransient) {
         if (attempt === MAX_RETRIES - 1) {
-          throw new QuotaError('gemini', 'Gemini-audio rate limit after all retries', 'utc_midnight')
+          if (is429) throw new QuotaError('gemini', 'Gemini-audio rate limit after all retries', 'utc_midnight')
+          throw e
         }
-        const delay = Math.pow(2, attempt) * 1000
-        console.log(`[transcribe] Gemini 429 — retrying in ${delay}ms (${attempt + 1}/${MAX_RETRIES})`)
+        const delay = Math.pow(2, attempt) * (is429 ? 1000 : 2000)
+        console.log(`[transcribe] Gemini ${is429 ? '429' : 'transient'} — retrying in ${delay}ms (${attempt + 1}/${MAX_RETRIES})`)
         await Bun.sleep(delay)
         continue
       }
