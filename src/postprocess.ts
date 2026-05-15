@@ -159,7 +159,20 @@ Rules:
 
 Be precise and factual. Do not hallucinate content not in the transcript. If a section has no relevant content, return an empty array (or omit optional string fields) rather than inventing material.`
 
-const MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'] as const
+/** When Gemma rejects `responseSchema`, retry once with plain JSON MIME + explicit shape (`PostprocessOutputSchema`). */
+const JSON_ONLY_SHAPE_TAIL = `\n\nCRITICAL RESPONSE FORMAT:
+Return ONLY a single JSON object (no markdown code fences, no commentary) with keys:
+- summary (string),
+- chapters (array of objects with string fields start, end, title only),
+- examHints (array of objects { "hint": string, "priority": "likely"|"tricky"|"general" }),
+- actionItems (array of strings).
+Follow every content rule above; use empty arrays only when the transcript truly has nothing qualifying.`
+
+const STRICT_MIN_FIELDS_NOTE =
+  `\n\nCRITICAL: You MUST include non-empty values for summary, chapters, examHints, and actionItems. Do not return empty arrays.`
+
+/** Gemini Flash first; then Gemini 2.5; last `gemma-4-31b-it` when both hit 429/quota (`postprocess` loop). Gemma retries without schema when structured output fails. */
+const MODELS = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemma-4-31b-it'] as const
 
 export interface PostprocessOptions {
   /** Run before each `generateContent`; throw to abort when over budget */
@@ -171,7 +184,7 @@ export interface PostprocessOptions {
 export async function postprocess(transcript: string, opts?: PostprocessOptions): Promise<PostprocessOutput> {
   for (const modelName of MODELS) {
     try {
-      const result = await callGemini(modelName, transcript, opts)
+      const result = await callPostprocessModel(modelName, transcript, opts)
       return result
     } catch (e: unknown) {
       if (isQuotaError(e)) throw e
@@ -190,7 +203,43 @@ export async function postprocess(transcript: string, opts?: PostprocessOptions)
   throw new Error('Unreachable')
 }
 
-async function callGemini(modelName: string, transcript: string, callbacks?: PostprocessOptions): Promise<PostprocessOutput> {
+function stripJsonFence(text: string): string {
+  const t = text.trim()
+  const m = /^```(?:json)?\s*([\s\S]*?)```$/m.exec(t)
+  return (m?.[1] ?? t).trim()
+}
+
+function formatModelError(e: unknown): string {
+  const err = e as { message?: string; status?: number }
+  const base = err?.message ?? String(e)
+  return err?.status != null ? `${err.status} ${base}` : base
+}
+
+/** True when we can try JSON-only (e.g. Gemma) instead of `responseSchema`. Never true for 429 — outer loop handles that. */
+function recoverableStructuredOutputFailure(e: unknown): boolean {
+  if (isQuotaError(e)) return false
+  const status = (e as { status?: number })?.status
+  const msg = String((e as Error)?.message ?? e)
+  if (status === 429) return false
+  if (status === 400 || status === 404 || status === 503) return true
+  if (/schema|structured|mime|unsupported|not supported|invalid argument|invalid model|400/i.test(msg)) return true
+  return false
+}
+
+async function callPostprocessModel(modelName: string, transcript: string, callbacks?: PostprocessOptions): Promise<PostprocessOutput> {
+  if (!modelName.startsWith('gemma-')) {
+    return callWithResponseSchema(modelName, transcript, callbacks)
+  }
+  try {
+    return await callWithResponseSchema(modelName, transcript, callbacks)
+  } catch (e: unknown) {
+    if (!recoverableStructuredOutputFailure(e)) throw e
+    console.warn(`[postprocess] ${modelName} structured generation failed (${formatModelError(e)}), retrying JSON-only...`)
+    return await callJsonOnlyModel(modelName, transcript, callbacks)
+  }
+}
+
+async function callWithResponseSchema(modelName: string, transcript: string, callbacks?: PostprocessOptions): Promise<PostprocessOutput> {
   const model = genAI.getGenerativeModel({
     model: modelName,
     generationConfig: {
@@ -203,7 +252,7 @@ async function callGemini(modelName: string, transcript: string, callbacks?: Pos
   callbacks?.beforeGeminiRequest?.()
   const result = await model.generateContent(SYSTEM_PROMPT + '\n\n--- TRANSCRIPT ---\n\n' + transcript)
   callbacks?.onGeminiRequest?.()
-  const text = result.response.text()
+  const text = stripJsonFence(result.response.text())
   const parsed = JSON.parse(text)
 
   // Zod validation for defense in depth
@@ -214,14 +263,45 @@ async function callGemini(modelName: string, transcript: string, callbacks?: Pos
     callbacks?.beforeGeminiRequest?.()
     const retryResult = await model.generateContent(
       SYSTEM_PROMPT +
-      '\n\nCRITICAL: You MUST include non-empty values for summary, chapters, examHints, and actionItems. Do not return empty arrays.' +
+      STRICT_MIN_FIELDS_NOTE +
       '\n\n--- TRANSCRIPT ---\n\n' + transcript,
     )
     callbacks?.onGeminiRequest?.()
-    const retryText = retryResult.response.text()
+    const retryText = stripJsonFence(retryResult.response.text())
     const retryParsed = JSON.parse(retryText)
     const retryValidated = PostprocessOutputSchema.parse(retryParsed)
     return retryValidated
+  }
+
+  return validated.data
+}
+
+async function callJsonOnlyModel(modelName: string, transcript: string, callbacks?: PostprocessOptions): Promise<PostprocessOutput> {
+  const model = genAI.getGenerativeModel({
+    model: modelName,
+    generationConfig: {
+      responseMimeType: 'application/json',
+    },
+  })
+
+  const block1 = SYSTEM_PROMPT + JSON_ONLY_SHAPE_TAIL + '\n\n--- TRANSCRIPT ---\n\n' + transcript
+  console.log(`[postprocess] Calling ${modelName} (JSON-only, no responseSchema)...`)
+  callbacks?.beforeGeminiRequest?.()
+  let text = stripJsonFence((await model.generateContent(block1)).response.text())
+  callbacks?.onGeminiRequest?.()
+  let parsed: unknown = JSON.parse(text)
+
+  let validated = PostprocessOutputSchema.safeParse(parsed)
+  if (!validated.success) {
+    console.warn(`[postprocess] Schema validation failed on JSON-only attempt, retrying with stricter prompt...`)
+    const block2 =
+      SYSTEM_PROMPT + JSON_ONLY_SHAPE_TAIL + STRICT_MIN_FIELDS_NOTE + '\n\n--- TRANSCRIPT ---\n\n' + transcript
+    callbacks?.beforeGeminiRequest?.()
+    text = stripJsonFence((await model.generateContent(block2)).response.text())
+    callbacks?.onGeminiRequest?.()
+    parsed = JSON.parse(text)
+    validated = PostprocessOutputSchema.safeParse(parsed)
+    if (!validated.success) throw validated.error
   }
 
   return validated.data
