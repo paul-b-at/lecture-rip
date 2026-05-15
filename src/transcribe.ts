@@ -9,7 +9,8 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
 const CACHE_DIR = '.cache/transcripts'
 const MAX_RETRIES = 5
-const GEMINI_INLINE_MAX_MB = 16
+/** Gemini inlineData limit is 100 MB (base64-encoded) since Jan 2026. Leave a small margin. */
+const GEMINI_INLINE_MAX_MB = 96
 /** 5 minutes — large base64 audio payloads on CI runners need time to upload + process. */
 const GEMINI_AUDIO_TIMEOUT_MS = 5 * 60 * 1000
 
