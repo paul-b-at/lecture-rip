@@ -178,7 +178,7 @@ Follow every content rule above; use empty arrays only when the transcript truly
 const STRICT_MIN_FIELDS_NOTE =
   `\n\nCRITICAL: You MUST include non-empty values for tldr, summary, chapters, examHints, actionItems, deepDive, selfCheck, and keyConcepts. Do not return empty arrays for required sections unless the transcript truly lacks all material for that section.`
 
-/** Gemini Flash first; then Gemini 2.5; last `gemma-4-31b-it` when both hit 429/quota (`postprocess` loop). Gemma retries without schema when structured output fails. */
+/** Gemini Flash first; then Gemini 2.5; last `gemma-4-31b-it` on 429/quota or transient overload (`postprocess` loop). Gemma retries without schema when structured output fails. */
 const MODELS = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemma-4-31b-it'] as const
 
 export interface PostprocessOptions {
@@ -188,6 +188,37 @@ export interface PostprocessOptions {
   onGeminiRequest?: () => void
 }
 
+function geminiErrorStatus(e: unknown): number | undefined {
+  const err = e as { status?: number; statusCode?: number }
+  if (typeof err?.status === 'number') return err.status
+  if (typeof err?.statusCode === 'number') return err.statusCode
+  const m = String((e as Error)?.message ?? e).match(/\[\s*(\d{3})\s+/)
+  return m ? Number(m[1]) : undefined
+}
+
+/** Try the next model in `MODELS` when the current one is rate-limited or temporarily unavailable. */
+function shouldFallbackToNextGeminiModel(e: unknown): boolean {
+  if (isQuotaError(e)) return false
+  const status = geminiErrorStatus(e)
+  const msg = String((e as Error)?.message ?? e).toLowerCase()
+  if (status === 429 || msg.includes('429') || msg.includes('quota') || msg.includes('rate limit'))
+    return true
+  if (status === 503 || status === 502 || status === 500 || status === 504)
+    return true
+  if (
+    msg.includes('503')
+    || msg.includes('502')
+    || msg.includes('500')
+    || msg.includes('504')
+    || msg.includes('service unavailable')
+    || msg.includes('high demand')
+    || msg.includes('overloaded')
+    || msg.includes('temporarily unavailable')
+  )
+    return true
+  return false
+}
+
 export async function postprocess(transcript: string, opts?: PostprocessOptions): Promise<PostprocessOutput> {
   for (const modelName of MODELS) {
     try {
@@ -195,15 +226,22 @@ export async function postprocess(transcript: string, opts?: PostprocessOptions)
       return result
     } catch (e: unknown) {
       if (isQuotaError(e)) throw e
-      const err = e as { status?: number; message?: string }
-      if (err?.status === 429 || err?.message?.includes('429') || err?.message?.includes('quota')) {
-        if (modelName === MODELS[MODELS.length - 1]) {
+      if (!shouldFallbackToNextGeminiModel(e))
+        throw e
+
+      const status = geminiErrorStatus(e)
+      const reason = status === 429 || String((e as Error)?.message ?? '').includes('429')
+        ? '429/quota'
+        : 'transient overload'
+
+      if (modelName === MODELS[MODELS.length - 1]) {
+        if (reason === '429/quota')
           throw new QuotaError('gemini', 'all models exhausted', 'utc_midnight')
-        }
-        console.log(`[postprocess] 429 on ${modelName}, falling back to next model...`)
-        continue
+        throw e
       }
-      throw e
+
+      console.log(`[postprocess] ${reason} on ${modelName}, falling back to next model...`)
+      continue
     }
   }
 

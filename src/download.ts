@@ -108,6 +108,32 @@ export async function chunkOnSilence(audioPath: string, maxSizeMB = 24): Promise
   return chunks
 }
 
+/** Split audio into fixed-length parts (local Whisper — avoids long-run hallucination loops). */
+export async function chunkByMaxDuration(audioPath: string, maxMinutes: number): Promise<string[]> {
+  if (!Number.isFinite(maxMinutes) || maxMinutes <= 0)
+    return [audioPath]
+
+  const maxSeconds = maxMinutes * 60
+  const duration = await getAudioDuration(audioPath)
+  if (duration <= maxSeconds)
+    return [audioPath]
+
+  await mkdir(`${TMP_DIR}/chunks`, { recursive: true })
+  const basename = path.basename(audioPath).replace(/\.[^.]+$/, '')
+  const chunks: string[] = []
+
+  for (let start = 0, i = 0; start < duration - 0.01; start += maxSeconds, i++) {
+    const chunkPath = path.join(TMP_DIR, 'chunks', `${basename}_tm${i}.opus`)
+    const len = Math.min(maxSeconds, duration - start)
+    const result = await $`ffmpeg -y -i ${audioPath} -ss ${start} -t ${len} -c:a libopus -b:a 32k ${chunkPath}`.quiet()
+    if (result.exitCode !== 0)
+      throw new Error(`ffmpeg time-chunk failed: ${result.stderr.toString()}`)
+    chunks.push(chunkPath)
+  }
+
+  return chunks
+}
+
 export async function cleanup(lectureId: string): Promise<void> {
   /** Avoid Bun `$` globs: they error with "no matches found" when the pattern matches nothing. */
   for (const ext of ['mp4', 'opus']) {

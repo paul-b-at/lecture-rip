@@ -239,9 +239,16 @@ async function processLecture(
         + ` (legacy .cache/transcripts/${lec.id}.json also checked)`,
       )
     }
-    const transcript = await transcriptFile.json()
+    const transcript = await transcriptFile.json() as { text?: string }
+    const transcriptText = typeof transcript.text === 'string' ? transcript.text.trim() : ''
+    if (!transcriptText) {
+      throw new Error(
+        `Transcript for ${lec.id} is empty (${tpath}). `
+        + 'Delete that cache file and re-run transcription, or check local Whisper JSON parsing.',
+      )
+    }
 
-    const output = await postprocess(transcript.text, {
+    const output = await postprocess(transcriptText, {
       beforeGeminiRequest: () => {
         if (!budget.canAffordGemini()) {
           throw new QuotaError('gemini', 'daily Gemini request limit reached', 'utc_midnight')
