@@ -281,45 +281,75 @@ function coerceTracks(media: unknown): TrackLike[] {
   return Array.isArray(t) ? t : [t]
 }
 
-export async function fetchEpisodesForSeries(baseUrl: string | undefined, seriesId: string): Promise<MediaEpisode[]> {
-  const base = normalizeMediaBase(baseUrl)
-  const episodes: MediaEpisode[] = []
+function parseEpisodeMediapackageRow(row: unknown, fallbackSeriesId = ''): MediaEpisode | null {
+  const mp = (row as { mediapackage?: Record<string, unknown> })?.mediapackage
+  if (!mp?.id) return null
+  const tracks = coerceTracks(mp.media)
+  const url = pickMp4(tracks)
+  if (!url) return null
+  const seriesId = String(mp.series ?? fallbackSeriesId)
+  return {
+    id: String(mp.id),
+    title: String(mp.title ?? 'Untitled'),
+    seriestitle: String(mp.seriestitle ?? ''),
+    seriesId: seriesId.includes('-') ? seriesId : fallbackSeriesId,
+    mp4Url: url,
+  }
+}
 
+async function fetchEpisodeSearchPages(
+  base: string,
+  params: Record<string, string>,
+  maxResults = 500,
+): Promise<MediaEpisode[]> {
+  const episodes: MediaEpisode[] = []
+  const seen = new Set<string>()
   let offset = 0
   const limit = 50
 
-  for (;;) {
+  while (offset < maxResults) {
     const u = new URL(`${base}/search/episode.json`)
-    u.searchParams.set('sid', seriesId)
     u.searchParams.set('limit', String(limit))
     u.searchParams.set('offset', String(offset))
+    for (const [k, v] of Object.entries(params))
+      u.searchParams.set(k, v)
+
     const res = await mediaFetch(u.href)
-    if (!res.ok) throw new Error(`episode search ${res.status}: ${await res.text().then((txt) => txt.slice(0, 120))}`)
-    const data = (await res.json()) as { result?: any[]; total?: number }
+    if (!res.ok)
+      throw new Error(`episode search ${res.status}: ${await res.text().then((txt) => txt.slice(0, 120))}`)
+    const data = (await res.json()) as { result?: unknown[]; total?: number }
 
     const batch = data.result ?? []
     for (const row of batch) {
-      const mp = row?.mediapackage
-      if (!mp?.id) continue
-      const tracks = coerceTracks(mp.media)
-      const url = pickMp4(tracks)
-      if (!url) continue
-
-      episodes.push({
-        id: String(mp.id),
-        title: String(mp.title ?? 'Untitled'),
-        seriestitle: String(mp.seriestitle ?? ''),
-        seriesId: String(mp.series ?? seriesId),
-        mp4Url: url,
-      })
+      const ep = parseEpisodeMediapackageRow(row, params.sid ?? '')
+      if (!ep || seen.has(ep.id)) continue
+      seen.add(ep.id)
+      episodes.push(ep)
     }
 
     offset += batch.length
-    const total = typeof data.total === 'number' ? data.total : batch.length
-    if (batch.length === 0 || offset >= total) break
+    const total = typeof data.total === 'number' ? data.total : offset
+    if (batch.length === 0 || offset >= total || episodes.length >= maxResults) break
   }
 
   return episodes.sort((a, b) => b.id.localeCompare(a.id))
+}
+
+export async function fetchEpisodesForSeries(baseUrl: string | undefined, seriesId: string): Promise<MediaEpisode[]> {
+  const base = normalizeMediaBase(baseUrl)
+  return fetchEpisodeSearchPages(base, { sid: seriesId })
+}
+
+/** Discover episodes by free-text query when they are not grouped under one OpenCast series. */
+export async function fetchEpisodesByQuery(
+  baseUrl: string | undefined,
+  query: string,
+  maxResults = 500,
+): Promise<MediaEpisode[]> {
+  const q = query.trim()
+  if (!q) return []
+  const base = normalizeMediaBase(baseUrl)
+  return fetchEpisodeSearchPages(base, { q }, maxResults)
 }
 
 /**
@@ -339,21 +369,10 @@ export async function fetchEpisodeMediapackageById(
   const data = (await res.json()) as { result?: any[] }
 
   for (const row of data.result ?? []) {
-    const mp = row?.mediapackage
-    if (!mp?.id || String(mp.id).toLowerCase() !== mediapackageId.toLowerCase()) continue
-    const tracks = coerceTracks(mp.media)
-    const url = pickMp4(tracks)
-    if (!url) continue
-    const seriesId = String(mp.series ?? '')
-    if (!seriesId.includes('-')) continue
-    const ep: MediaEpisode = {
-      id: String(mp.id),
-      title: String(mp.title ?? 'Untitled'),
-      seriestitle: String(mp.seriestitle ?? ''),
-      seriesId,
-      mp4Url: url,
-    }
-    return { episode: ep, seriesId, seriestitle: ep.seriestitle }
+    const ep = parseEpisodeMediapackageRow(row)
+    if (!ep || ep.id.toLowerCase() !== mediapackageId.toLowerCase()) continue
+    if (!ep.seriesId.includes('-')) continue
+    return { episode: ep, seriesId: ep.seriesId, seriestitle: ep.seriestitle }
   }
   return null
 }
