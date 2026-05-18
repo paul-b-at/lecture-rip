@@ -347,63 +347,263 @@ export async function setSkipReason(pageId: string, reason: string): Promise<voi
   })
 }
 
+/** Notion caps each append at 100 children — stay slightly under. */
+const NOTION_BLOCKS_APPEND_MAX = 90
+
+type NotionRichText = Array<{
+  type: 'text'
+  text: { content: string }
+  annotations?: { bold?: boolean; italic?: boolean }
+}>
+
+async function appendBlocksChunked(pageId: string, children: Record<string, unknown>[]): Promise<void> {
+  for (let i = 0; i < children.length; i += NOTION_BLOCKS_APPEND_MAX) {
+    await notion.blocks.children.append({
+      block_id: pageId,
+      children: children.slice(i, i + NOTION_BLOCKS_APPEND_MAX) as any,
+    })
+  }
+}
+
+function heading2(title: string): Record<string, unknown> {
+  return {
+    object: 'block',
+    type: 'heading_2',
+    heading_2: { rich_text: richTextRunsFromString(title) },
+  }
+}
+
+function paragraphBlock(text: string): Record<string, unknown> {
+  return {
+    object: 'block',
+    type: 'paragraph',
+    paragraph: { rich_text: richTextRunsFromString(text) },
+  }
+}
+
+function bulletBlock(richText: NotionRichText): Record<string, unknown> {
+  return {
+    object: 'block',
+    type: 'bulleted_list_item',
+    bulleted_list_item: { rich_text: richText },
+  }
+}
+
+function tldrCallout(tldr: string): Record<string, unknown> {
+  const body = tldr.trim().length > 0 ? tldr.trim() : '—'
+  const rich_text: NotionRichText = [
+    { type: 'text', text: { content: 'TL;DR' }, annotations: { bold: true } },
+    ...richTextRunsFromString(` — ${body}`),
+  ]
+  return {
+    object: 'block',
+    type: 'callout',
+    callout: {
+      rich_text,
+      icon: { type: 'emoji', emoji: '⚡' },
+      color: 'blue_background',
+    },
+  }
+}
+
+function tableRowCells(cols: string[]): Record<string, unknown> {
+  return {
+    object: 'block',
+    type: 'table_row',
+    table_row: {
+      cells: cols.map(c => richTextRunsFromString(c)),
+    },
+  }
+}
+
+function chaptersTable(output: PostprocessOutput): Record<string, unknown> {
+  const rows = output.chapters.map(c => [
+    `${c.start}–${c.end}`,
+    c.title,
+    c.takeaway.trim().length > 0 ? c.takeaway.trim() : '—',
+  ])
+  const children = [
+    tableRowCells(['Time', 'Chapter', 'Takeaway']),
+    ...(rows.length > 0 ? rows.map(r => tableRowCells(r)) : [tableRowCells(['—', '—', '—'])]),
+  ]
+  return {
+    object: 'block',
+    type: 'table',
+    table: {
+      table_width: 3,
+      has_column_header: true,
+      has_row_header: false,
+      children,
+    },
+  }
+}
+
+function keyConceptRuns(term: string, definition: string, whyItMatters: string): NotionRichText {
+  const runs: NotionRichText = [
+    { type: 'text', text: { content: term }, annotations: { bold: true } },
+    ...richTextRunsFromString(` — ${definition}`),
+  ]
+  const why = whyItMatters.trim()
+  if (why.length > 0) {
+    runs.push({ type: 'text', text: { content: ' ' } })
+    runs.push({ type: 'text', text: { content: 'Why:' }, annotations: { italic: true } })
+    runs.push({ type: 'text', text: { content: ' ' } })
+    runs.push(...richTextRunsFromString(why))
+  }
+  return runs
+}
+
+function examHintRuns(priority: string, hint: string): NotionRichText {
+  const emoji = priority === 'likely' ? '🎯 ' : priority === 'tricky' ? '⚠️ ' : '📌 '
+  const label = priority === 'likely' ? 'Likely' : priority === 'tricky' ? 'Tricky' : 'General'
+  return [
+    { type: 'text', text: { content: emoji } },
+    { type: 'text', text: { content: label }, annotations: { bold: true } },
+    ...richTextRunsFromString(` — ${hint}`),
+  ]
+}
+
+function deepDiveToggleBlock(topic: string, lines: Array<{ label: string; body: string }>): Record<string, unknown> {
+  const children = lines.map(({ label, body }) => ({
+    object: 'block',
+    type: 'paragraph',
+    paragraph: {
+      rich_text: [
+        { type: 'text', text: { content: `${label}: ` }, annotations: { bold: true } },
+        ...richTextRunsFromString(body),
+      ],
+    },
+  }))
+  return {
+    object: 'block',
+    type: 'toggle',
+    toggle: {
+      rich_text: richTextRunsFromString(topic),
+      children,
+    },
+  }
+}
+
+function selfCheckToggleBlock(question: string, answer: string): Record<string, unknown> {
+  return {
+    object: 'block',
+    type: 'toggle',
+    toggle: {
+      rich_text: [
+        { type: 'text', text: { content: 'Q: ' }, annotations: { bold: true } },
+        ...richTextRunsFromString(question),
+      ],
+      children: [
+        {
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [
+              { type: 'text', text: { content: 'A: ' }, annotations: { bold: true } },
+              ...richTextRunsFromString(answer),
+            ],
+          },
+        },
+      ],
+    },
+  }
+}
+
+function connectionBullet(label: string, items: string[]): Record<string, unknown> | null {
+  if (items.length === 0) return null
+  const body = items.join('; ')
+  return bulletBlock([
+    { type: 'text', text: { content: `${label}: ` }, annotations: { bold: true } },
+    ...richTextRunsFromString(body),
+  ])
+}
+
 export async function writePostprocessResults(pageId: string, output: PostprocessOutput): Promise<void> {
-  const chaptersText = output.chapters
-    .map(c => `${c.start}–${c.end}: ${c.title}`)
-    .join('\n')
+  const blocks: Record<string, unknown>[] = []
 
-  const examText = output.examHints.join('\n• ')
-  const actionText = output.actionItems.join('\n• ')
+  blocks.push(tldrCallout(output.tldr))
 
-  await notion.blocks.children.append({
-    block_id: pageId,
-    children: [
-      {
-        object: 'block',
-        type: 'heading_2',
-        heading_2: { rich_text: [{ type: 'text', text: { content: 'Summary' } }] },
+  blocks.push(heading2('📝 Summary'))
+  blocks.push(paragraphBlock(output.summary.trim().length > 0 ? output.summary : '—'))
+
+  blocks.push(heading2('🧠 Key Concepts'))
+  if (output.keyConcepts.length === 0)
+    blocks.push(paragraphBlock('—'))
+  else
+    blocks.push(...output.keyConcepts.map(k => bulletBlock(keyConceptRuns(k.term, k.definition, k.whyItMatters))))
+
+  blocks.push(heading2('🗂️ Chapters'))
+  blocks.push(chaptersTable(output))
+
+  blocks.push(heading2('🔬 Deep Dive'))
+  if (output.deepDive.length === 0)
+    blocks.push(paragraphBlock('—'))
+  else {
+    for (const d of output.deepDive) {
+      const lines: Array<{ label: string; body: string }> = [
+        { label: 'What', body: d.whatItIs },
+        { label: 'How', body: d.howItWorks },
+      ]
+      if (d.whyItMatters.trim())
+        lines.push({ label: 'Why', body: d.whyItMatters.trim() })
+      if (d.example.trim())
+        lines.push({ label: 'Example', body: d.example.trim() })
+      blocks.push(deepDiveToggleBlock(d.topic, lines))
+    }
+  }
+
+  if (output.formulas.length > 0) {
+    blocks.push(heading2('📐 Formulas'))
+    for (const f of output.formulas) {
+      const notes = f.notes.trim()
+      const body = notes.length > 0 ? `${f.expression} (${notes})` : f.expression
+      blocks.push(bulletBlock([
+        { type: 'text', text: { content: `${f.name}: ` }, annotations: { bold: true } },
+        ...richTextRunsFromString(body),
+      ]))
+    }
+  }
+
+  if (output.pitfalls.length > 0) {
+    blocks.push(heading2('⚠️ Pitfalls'))
+    blocks.push(...output.pitfalls.map(p => bulletBlock(richTextRunsFromString(p))))
+  }
+
+  if (output.examHints.length > 0) {
+    blocks.push(heading2('🎯 Exam Hints'))
+    blocks.push(...output.examHints.map(h => bulletBlock(examHintRuns(h.priority, h.hint))))
+  }
+
+  if (output.actionItems.length > 0) {
+    blocks.push(heading2('✅ Action Items'))
+    blocks.push(...output.actionItems.map(text => ({
+      object: 'block',
+      type: 'to_do',
+      to_do: {
+        rich_text: richTextRunsFromString(text),
+        checked: false,
       },
-      {
-        object: 'block',
-        type: 'paragraph',
-        paragraph: { rich_text: richTextRunsFromString(output.summary) },
-      },
-      {
-        object: 'block',
-        type: 'heading_2',
-        heading_2: { rich_text: [{ type: 'text', text: { content: 'Chapters' } }] },
-      },
-      {
-        object: 'block',
-        type: 'paragraph',
-        paragraph: { rich_text: richTextRunsFromString(chaptersText) },
-      },
-      ...(output.examHints.length > 0 ? [
-        {
-          object: 'block' as const,
-          type: 'heading_2' as const,
-          heading_2: { rich_text: [{ type: 'text' as const, text: { content: 'Exam Hints' } }] },
-        },
-        {
-          object: 'block' as const,
-          type: 'paragraph' as const,
-          paragraph: { rich_text: richTextRunsFromString('• ' + examText) },
-        },
-      ] : []),
-      ...(output.actionItems.length > 0 ? [
-        {
-          object: 'block' as const,
-          type: 'heading_2' as const,
-          heading_2: { rich_text: [{ type: 'text' as const, text: { content: 'Action Items' } }] },
-        },
-        {
-          object: 'block' as const,
-          type: 'paragraph' as const,
-          paragraph: { rich_text: richTextRunsFromString('• ' + actionText) },
-        },
-      ] : []),
-    ],
-  })
+    })))
+  }
+
+  const cx = output.connections
+  if (cx.buildsOn.length > 0 || cx.leadsTo.length > 0 || cx.related.length > 0) {
+    blocks.push(heading2('🔗 Connections'))
+    const cb = connectionBullet('Builds on', cx.buildsOn)
+    const cl = connectionBullet('Leads to', cx.leadsTo)
+    const cr = connectionBullet('Related', cx.related)
+    if (cb) blocks.push(cb)
+    if (cl) blocks.push(cl)
+    if (cr) blocks.push(cr)
+  }
+
+  blocks.push(heading2('❓ Self-Check'))
+  if (output.selfCheck.length === 0)
+    blocks.push(paragraphBlock('—'))
+  else
+    blocks.push(...output.selfCheck.map(s => selfCheckToggleBlock(s.question, s.answer)))
+
+  await appendBlocksChunked(pageId, blocks)
 }
 
 // --- Helpers ---

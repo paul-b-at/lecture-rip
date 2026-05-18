@@ -19,7 +19,7 @@ AI lecture transcriber for JKU — **GitHub Actions runs every 3 hours** (`0 */3
 
 - **Runtime:** Bun + TypeScript
 - **Discovery:** `https://media.jku.at/search/series.json` + `/search/episode.json` (no Moodle login)
-- **Transcription:** Groq Whisper (`whisper-large-v3`); downshifts to `whisper-large-v3-turbo` under budget pressure.
+- **Transcription:** Groq Whisper (`whisper-large-v3`) by default; downshifts to `whisper-large-v3-turbo` under budget pressure. **Optional:** `--local` / `TRANSCRIBE_LOCAL=true` runs **whisper.cpp** on your machine (`WHISPER_MODEL_PATH`; see `.env.example`) and skips Groq — postprocessing stays on **Gemini** with the same model fallback chain.
 - **Postprocessing:** Gemini (model chain in [`src/postprocess.ts`](src/postprocess.ts)).
 - **Storage:** Notion (Lectures DB + Subjects DB)
 - **CI:** GitHub Actions every 3 hours (`cron: 0 */3 * * *`; ~8 runs/day on the free tier)
@@ -43,7 +43,7 @@ Semester tagging follows OpenCast: **`YYYYW`** (Wintersemester roughly Oct–Feb
 
 1. Copy `.env.example` to `.env` and fill in credentials
 2. `bun install`
-3. `bun run start`
+3. `bun run start` (append `-- --local` for local whisper.cpp instead of Groq when you’ve set `WHISPER_MODEL_PATH`)
 
 To capture logs, use `bun run start:tee` (creates `logs/`, then runs with `bash -o pipefail` so if `bun` fails, the script's exit code reflects that—not just `tee`).
 

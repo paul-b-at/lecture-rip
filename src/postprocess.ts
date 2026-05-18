@@ -162,14 +162,21 @@ Be precise and factual. Do not hallucinate content not in the transcript. If a s
 /** When Gemma rejects `responseSchema`, retry once with plain JSON MIME + explicit shape (`PostprocessOutputSchema`). */
 const JSON_ONLY_SHAPE_TAIL = `\n\nCRITICAL RESPONSE FORMAT:
 Return ONLY a single JSON object (no markdown code fences, no commentary) with keys:
+- tldr (string),
 - summary (string),
-- chapters (array of objects with string fields start, end, title only),
-- examHints (array of objects { "hint": string, "priority": "likely"|"tricky"|"general" }),
-- actionItems (array of strings).
+- keyConcepts (array of { term, definition, whyItMatters? }),
+- chapters (array of { start, end, title, takeaway }),
+- deepDive (array of { topic, whatItIs, howItWorks, whyItMatters?, example? }),
+- formulas (array of { name, expression, notes? }),
+- pitfalls (array of strings),
+- examHints (array of { hint, priority: "likely"|"tricky"|"general" }),
+- actionItems (array of strings),
+- connections ({ buildsOn?, leadsTo?, related?: arrays of strings }),
+- selfCheck (array of { question, answer }).
 Follow every content rule above; use empty arrays only when the transcript truly has nothing qualifying.`
 
 const STRICT_MIN_FIELDS_NOTE =
-  `\n\nCRITICAL: You MUST include non-empty values for summary, chapters, examHints, and actionItems. Do not return empty arrays.`
+  `\n\nCRITICAL: You MUST include non-empty values for tldr, summary, chapters, examHints, actionItems, deepDive, selfCheck, and keyConcepts. Do not return empty arrays for required sections unless the transcript truly lacks all material for that section.`
 
 /** Gemini Flash first; then Gemini 2.5; last `gemma-4-31b-it` when both hit 429/quota (`postprocess` loop). Gemma retries without schema when structured output fails. */
 const MODELS = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemma-4-31b-it'] as const
