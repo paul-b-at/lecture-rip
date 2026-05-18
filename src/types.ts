@@ -102,9 +102,6 @@ export interface BudgetState {
   groqDailyRequestLimit: number
   geminiRequests: number
   geminiDailyLimit: number
-  /** `generateContent` calls this UTC day for Gemini-audio transcribe fallback only */
-  geminiAudioRequests: number
-  geminiAudioDailyLimit: number
 }
 
 export type QuotaResumeAfter = 'utc_hour' | 'utc_midnight'

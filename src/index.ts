@@ -12,7 +12,7 @@ import {
 } from './notion'
 import { postprocess } from './postprocess'
 import { semesterAnchorForPipeline } from './semester'
-import { transcribe, type TranscribeProvider } from './transcribe'
+import { transcribe } from './transcribe'
 import {
   isQuotaError,
   QuotaError,
@@ -33,58 +33,43 @@ function logQuotaDeferralHint(e: QuotaError): void {
   const resume =
     e.resumeAfter === 'utc_hour'
       ? 'Retries on the next hourly run after the UTC hour rolls over.'
-      : 'Retries after UTC midnight resets daily Groq Whisper / Groq audio / Gemini counters.'
+      : 'Retries after UTC midnight resets daily Groq / Gemini counters.'
   console.warn(`[lecture-rip] Hit quota (${e.resumeAfter}); ${resume}`)
   console.warn(`  ${e.message}`)
 }
 
-/** Before FFmpeg / MP4 fetch: allow work if Groq can cover this lecture OR Gemini-audio fallback can. */
-function ensureTranscribeBudgetBeforeNewHeavyWork(budget: BudgetTracker, estimatedAudioSeconds?: number): void {
+/** Before FFmpeg / MP4 fetch: avoid burning bandwidth when Whisper requests or audio quota are insufficient. */
+function ensureGroqBudgetBeforeNewHeavyWork(budget: BudgetTracker, estimatedAudioSeconds?: number): void {
+  if (!budget.canAffordGroqRequest()) {
+    throw new QuotaError(
+      'groq',
+      'daily Whisper API request limit reached',
+      'utc_midnight',
+    )
+  }
+
   const est =
     estimatedAudioSeconds != null && Number.isFinite(estimatedAudioSeconds) && estimatedAudioSeconds > 0
       ? Math.ceil(estimatedAudioSeconds)
       : undefined
 
-  const groqOk = budget.canAffordGroqRequest()
-    && (est !== undefined ? budget.canAffordGroq(est) : budget.groqRemaining > 60)
-
-  const geminiOk =
-    est !== undefined
-      ? budget.canAffordGeminiTranscriptionForDuration(est)
-      : budget.canAffordGeminiAudio()
-
-  if (groqOk || geminiOk) return
-
-  if (!budget.canAffordGroqRequest()) {
-    throw new QuotaError(
-      'groq',
-      'daily Whisper request limit reached; Gemini-audio budget insufficient for fallback',
-      'utc_midnight',
-    )
-  }
-
   if (est !== undefined) {
-    if (budget.groqDailyAudioRemaining < est) {
+    if (!budget.canAffordGroq(est)) {
       throw new QuotaError(
         'groq',
-        'daily Groq decoded-audio limit; Gemini-audio budget insufficient for fallback',
-        'utc_midnight',
-      )
-    }
-    if (budget.groqRemaining < est) {
-      throw new QuotaError(
-        'groq',
-        'hourly Groq decoded-audio limit; Gemini-audio budget insufficient for fallback',
-        'utc_hour',
+        `decoded-audio quota: need ~${est}s but hourly or daily limit reached`,
+        budget.groqRemaining < est ? 'utc_hour' : 'utc_midnight',
       )
     }
   }
   else {
-    throw new QuotaError(
-      'groq',
-      'low Groq hourly budget and Gemini-audio exhausted — refusing unknown-duration download',
-      'utc_hour',
-    )
+    if (budget.groqRemaining <= 60) {
+      throw new QuotaError(
+        'groq',
+        '<60s hourly Groq audio budget left — refusing unknown-duration download until next UTC hour',
+        'utc_hour',
+      )
+    }
   }
 }
 
@@ -169,7 +154,7 @@ async function processLecture(
   let audioPath: string | undefined
 
   if (stageBefore(currentStatus, 'Downloaded')) {
-    ensureTranscribeBudgetBeforeNewHeavyWork(budget, lec.durationSeconds)
+    ensureGroqBudgetBeforeNewHeavyWork(budget, lec.durationSeconds)
     audioPath = await downloadAndConvert(lec.opencastUrl, lec.id)
     await setStage(pageId, 'Downloaded')
     currentStatus = 'Downloaded'
@@ -180,52 +165,30 @@ async function processLecture(
       audioPath = `tmp/${lec.id}.opus`
       const exists = await Bun.file(audioPath).exists()
       if (!exists) {
-        ensureTranscribeBudgetBeforeNewHeavyWork(budget, lec.durationSeconds)
+        ensureGroqBudgetBeforeNewHeavyWork(budget, lec.durationSeconds)
         audioPath = await downloadAndConvert(lec.opencastUrl, lec.id)
       }
     }
 
     const audioSeconds = await getAudioDuration(audioPath)
 
-    let provider: TranscribeProvider = budget.groqCoversTranscription(audioSeconds) ? 'groq' : 'gemini'
-
-    if (provider === 'gemini') {
-      console.log('[lecture-rip] Groq quota tight — using Gemini audio for this lecture')
-      if (!budget.canAffordGeminiTranscriptionForDuration(audioSeconds)) {
-        throw new QuotaError(
-          'gemini',
-          'Gemini-audio transcription budget insufficient for this lecture',
-          'utc_midnight',
-        )
-      }
+    if (!budget.canAffordGroq(audioSeconds)) {
+      throw new QuotaError(
+        'groq',
+        `decoded-audio quota: need ~${Math.ceil(audioSeconds)}s but hourly or daily limit reached`,
+        budget.groqRemaining < audioSeconds ? 'utc_hour' : 'utc_midnight',
+      )
     }
 
-    const tier = provider === 'groq' && budget.shouldDownshiftGroq() ? 'fast' : 'best'
+    const tier = budget.shouldDownshiftGroq() ? 'fast' : 'best'
     if (tier === 'fast') console.log(`[lecture-rip] Budget pressure — using whisper-large-v3-turbo`)
 
-    try {
-      await transcribe(audioPath, lec.id, {
-        glossary: lec.glossary,
-        tier,
-        budget,
-        provider,
-      })
-    } catch (e: unknown) {
-      if (provider === 'groq' && isQuotaError(e) && budget.canAffordGeminiAudio()) {
-        console.warn(`[lecture-rip] Groq 429 mid-transcribe — falling back to Gemini audio`)
-        provider = 'gemini'
-        await transcribe(audioPath, lec.id, {
-          glossary: lec.glossary,
-          budget,
-          provider: 'gemini',
-        })
-      } else {
-        throw e
-      }
-    }
-    if (provider === 'groq') {
-      budget.recordGroqUsage(audioSeconds)
-    }
+    await transcribe(audioPath, lec.id, {
+      glossary: lec.glossary,
+      tier,
+      budget,
+    })
+    budget.recordGroqUsage(audioSeconds)
     await budget.save()
 
     await setStage(pageId, 'Transcribed')
