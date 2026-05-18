@@ -48,7 +48,8 @@ function transcribeLocalEnabled(opts: TranscribeOptions): boolean {
 
 function whisperCli(): string {
   const t = (process.env.WHISPER_CLI ?? '').trim()
-  return t.length > 0 ? t : 'whisper-cpp'
+  /** Homebrew `brew install whisper-cpp` installs `whisper-cli` in `$(brew --prefix whisper-cpp)/bin`, not `whisper-cpp`. */
+  return t.length > 0 ? t : 'whisper-cli'
 }
 
 function whisperModelPath(): string {
@@ -137,7 +138,7 @@ async function transcribeChunkLocal(chunkPath: string, opts: { glossary?: string
         '-oj',
         '-of',
         outPrefix,
-        ...(glossary.length > 0 ? ['-p', glossary] : []),
+        ...(glossary.length > 0 ? ['--prompt', glossary] : []),
         ...extra,
       ],
       stdout: 'pipe',
@@ -149,7 +150,7 @@ async function transcribeChunkLocal(chunkPath: string, opts: { glossary?: string
     if (code !== 0)
       throw new Error(
         `${cli} exited ${code}. stderr:\n${stderr.slice(-4000)}\n`
-        + `Hint: set WHISPER_CLI to your whisper binary if not named whisper-cpp.`,
+        + `Hint: Homebrew installs \`whisper-cli\` (set WHISPER_CLI to its full path if not on PATH).`,
       )
 
     const jsonPath = `${outPrefix}.json`

@@ -43,7 +43,7 @@ Semester tagging follows OpenCast: **`YYYYW`** (Wintersemester roughly Oct–Feb
 
 1. Copy `.env.example` to `.env` and fill in credentials
 2. `bun install`
-3. `bun run start` (append `-- --local` for local whisper.cpp instead of Groq when you’ve set `WHISPER_MODEL_PATH`)
+3. `bun run start` (append `-- --local` for local transcription when `WHISPER_MODEL_PATH` is set; Homebrew’s formula installs **`whisper-cli`**, not `whisper-cpp` — see `.env.example`)
 
 To capture logs, use `bun run start:tee` (creates `logs/`, then runs with `bash -o pipefail` so if `bun` fails, the script's exit code reflects that—not just `tee`).
 
