@@ -19,7 +19,7 @@ AI lecture transcriber for JKU — **GitHub Actions runs every 3 hours** (`0 */3
 
 - **Runtime:** Bun + TypeScript
 - **Discovery:** `https://media.jku.at/search/series.json` + `/search/episode.json` (no Moodle login)
-- **Transcription:** Groq Whisper (`whisper-large-v3`) by default; downshifts to `whisper-large-v3-turbo` under budget pressure. **Optional:** `--local` / `TRANSCRIBE_LOCAL=true` runs **whisper.cpp** on your machine (`WHISPER_MODEL_PATH`; see `.env.example`) and skips Groq — postprocessing stays on **Gemini** with the same model fallback chain.
+- **Transcription:** Groq Whisper (`whisper-large-v3`) by default; downshifts to `whisper-large-v3-turbo` under budget pressure. **Optional:** `--local` / `TRANSCRIBE_LOCAL=true` runs **whisper.cpp** on your machine (`WHISPER_MODEL_PATH`; see `.env.example`) and skips Groq — local runs are **time-chunked** (default **12 min** via `WHISPER_CHUNK_MINUTES`) to avoid repetition on long lectures; postprocessing stays on **Gemini**.
 - **Postprocessing:** Gemini (model chain in [`src/postprocess.ts`](src/postprocess.ts)).
 - **Storage:** Notion (Lectures DB + Subjects DB)
 - **CI:** GitHub Actions every 3 hours (`cron: 0 */3 * * *`; ~8 runs/day on the free tier)

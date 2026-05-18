@@ -3,7 +3,7 @@ import { $ } from 'bun'
 import path from 'node:path'
 import { mkdir, unlink } from 'node:fs/promises'
 import type { BudgetTracker } from './budget'
-import { chunkOnSilence, getAudioDuration } from './download'
+import { chunkByMaxDuration, chunkOnSilence, getAudioDuration } from './download'
 import { isQuotaError, QuotaError } from './types'
 
 let groqClient: Groq | null = null
@@ -44,6 +44,38 @@ export interface TranscribeOptions {
 
 function transcribeLocalEnabled(opts: TranscribeOptions): boolean {
   return opts.provider === 'local'
+}
+
+/** Max minutes per local `whisper-cli` run (`WHISPER_CHUNK_MINUTES`; default 12). Set 0 to disable. */
+function whisperLocalChunkMinutes(): number {
+  const raw = (process.env.WHISPER_CHUNK_MINUTES ?? '').trim().toLowerCase()
+  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'no')
+    return 0
+  const n = raw.length > 0 ? Number(raw) : 12
+  return Number.isFinite(n) && n > 0 ? n : 12
+}
+
+async function prepareTranscriptionChunks(audioPath: string, opts: TranscribeOptions): Promise<string[]> {
+  let chunks = await chunkOnSilence(audioPath)
+
+  if (!transcribeLocalEnabled(opts))
+    return chunks
+
+  const maxMin = whisperLocalChunkMinutes()
+  if (maxMin <= 0)
+    return chunks
+
+  const expanded: string[] = []
+  for (const c of chunks)
+    expanded.push(...await chunkByMaxDuration(c, maxMin))
+
+  if (expanded.length > chunks.length) {
+    console.log(
+      `[transcribe] Local time-chunking: ${chunks.length} file(s) → ${expanded.length} parts (≤${maxMin} min each)`,
+    )
+  }
+
+  return expanded
 }
 
 function whisperCli(): string {
@@ -256,7 +288,7 @@ export async function transcribe(
     }
   }
 
-  const chunks = await chunkOnSilence(audioPath)
+  const chunks = await prepareTranscriptionChunks(audioPath, opts)
   const allSegments: TranscriptionResult['segments'] = []
   let fullText = ''
   let totalDuration = 0
