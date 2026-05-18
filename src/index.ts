@@ -12,7 +12,7 @@ import {
 } from './notion'
 import { postprocess } from './postprocess'
 import { semesterAnchorForPipeline } from './semester'
-import { transcribe } from './transcribe'
+import { transcribe, type TranscriptionProvider } from './transcribe'
 import {
   isQuotaError,
   QuotaError,
@@ -22,6 +22,30 @@ import {
 
 const FORCE = process.env.FORCE_RERIP === 'true'
 const COURSE_FILTER = process.env.COURSE_FILTER || undefined
+
+/** CLI `--local` or `TRANSCRIBE_LOCAL=true`: run whisper.cpp on disk instead of Groq API (see WHISPER_MODEL_PATH). */
+const TRANSCRIBE_LOCAL =
+  process.argv.includes('--local')
+  || (process.env.TRANSCRIBE_LOCAL ?? '').trim().toLowerCase() === 'true'
+
+function transcriptionProvider(): TranscriptionProvider {
+  return TRANSCRIBE_LOCAL ? 'local' : 'groq'
+}
+
+function transcriptJsonPath(lectureId: string): string {
+  return `.cache/transcripts/${lectureId}.${transcriptionProvider()}.json`
+}
+
+/** Prefer provider-specific cache; fall back to legacy `.cache/transcripts/<id>.json` from older runs. */
+async function resolveTranscriptJsonPath(lectureId: string): Promise<string> {
+  const primary = transcriptJsonPath(lectureId)
+  if (await Bun.file(primary).exists())
+    return primary
+  const legacy = `.cache/transcripts/${lectureId}.json`
+  if (await Bun.file(legacy).exists())
+    return legacy
+  return primary
+}
 
 interface RunStats {
   processed: number
@@ -40,6 +64,9 @@ function logQuotaDeferralHint(e: QuotaError): void {
 
 /** Before FFmpeg / MP4 fetch: avoid burning bandwidth when Whisper requests or audio quota are insufficient. */
 function ensureGroqBudgetBeforeNewHeavyWork(budget: BudgetTracker, estimatedAudioSeconds?: number): void {
+  if (TRANSCRIBE_LOCAL)
+    return
+
   if (!budget.canAffordGroqRequest()) {
     throw new QuotaError(
       'groq',
@@ -82,6 +109,7 @@ async function main() {
       ? `${semesterInfo.semester} (from MEDIA_SEMESTER)`
       : `${semesterInfo.semester} (auto • JKU calendar • ${semesterInfo.timeZoneUsed ?? '?'}; Oct–Feb→W • Mar–Sep→S)`
   console.log(`[lecture-rip] MEDIA_SEMESTER=${semLog}`)
+  console.log(`[lecture-rip] transcription=${TRANSCRIBE_LOCAL ? 'local (whisper.cpp)' : 'groq_api'}`)
 
   const budget = await BudgetTracker.load()
   console.log(`[lecture-rip] Budget: ${budget.summary()}`)
@@ -172,33 +200,44 @@ async function processLecture(
 
     const audioSeconds = await getAudioDuration(audioPath)
 
-    if (!budget.canAffordGroq(audioSeconds)) {
-      throw new QuotaError(
-        'groq',
-        `decoded-audio quota: need ~${Math.ceil(audioSeconds)}s but hourly or daily limit reached`,
-        budget.groqRemaining < audioSeconds ? 'utc_hour' : 'utc_midnight',
-      )
+    if (!TRANSCRIBE_LOCAL) {
+      if (!budget.canAffordGroq(audioSeconds)) {
+        throw new QuotaError(
+          'groq',
+          `decoded-audio quota: need ~${Math.ceil(audioSeconds)}s but hourly or daily limit reached`,
+          budget.groqRemaining < audioSeconds ? 'utc_hour' : 'utc_midnight',
+        )
+      }
     }
 
-    const tier = budget.shouldDownshiftGroq() ? 'fast' : 'best'
-    if (tier === 'fast') console.log(`[lecture-rip] Budget pressure — using whisper-large-v3-turbo`)
+    const tier = TRANSCRIBE_LOCAL ? 'best' : budget.shouldDownshiftGroq() ? 'fast' : 'best'
+    if (!TRANSCRIBE_LOCAL && tier === 'fast')
+      console.log(`[lecture-rip] Budget pressure — using whisper-large-v3-turbo`)
 
     await transcribe(audioPath, lec.id, {
       glossary: lec.glossary,
       tier,
       budget,
+      provider: transcriptionProvider(),
     })
-    budget.recordGroqUsage(audioSeconds)
-    await budget.save()
+
+    if (!TRANSCRIBE_LOCAL) {
+      budget.recordGroqUsage(audioSeconds)
+      await budget.save()
+    }
 
     await setStage(pageId, 'Transcribed')
     currentStatus = 'Transcribed'
   }
 
   if (stageBefore(currentStatus, 'Postprocessed')) {
-    const transcriptFile = Bun.file(`.cache/transcripts/${lec.id}.json`)
+    const tpath = await resolveTranscriptJsonPath(lec.id)
+    const transcriptFile = Bun.file(tpath)
     if (!(await transcriptFile.exists())) {
-      throw new Error(`Transcript not found for ${lec.id} — expected at .cache/transcripts/${lec.id}.json`)
+      throw new Error(
+        `Transcript not found for ${lec.id} — expected at ${transcriptJsonPath(lec.id)}`
+        + ` (legacy .cache/transcripts/${lec.id}.json also checked)`,
+      )
     }
     const transcript = await transcriptFile.json()
 
