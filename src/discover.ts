@@ -3,11 +3,13 @@ import {
   normalizeMediaBase,
   extractEpisodeHintUuid,
   fetchEpisodeMediapackageById,
+  fetchEpisodesByQuery,
   fetchEpisodesForSeries,
   lecturePageUrl,
   parseMediaCourseKey,
   resolveSeriesForSubject,
   seriesTitlesMatch,
+  type MediaEpisode,
 } from './media-jku'
 import { luOnlyDiscoverySemestersInOrder, semesterAnchorForPipeline } from './semester'
 
@@ -124,6 +126,39 @@ function parseUuid(raw: string): string | null {
   return m ? m[0].toLowerCase() : null
 }
 
+/** Prefer episodes whose title/seriestitle mentions the pipeline semester; keep all if none match. */
+function filterEpisodesBySemesterHint(episodes: MediaEpisode[], semester: string): MediaEpisode[] {
+  const sem = semester.trim()
+  if (!sem) return episodes
+  const filtered = episodes.filter((ep) => {
+    const blob = `${ep.title} ${ep.seriestitle}`.toLowerCase()
+    return blob.includes(sem.toLowerCase())
+  })
+  return filtered.length > 0 ? filtered : episodes
+}
+
+function appendDiscoveredEpisodes(
+  discovered: DiscoveredLecture[],
+  episodes: MediaEpisode[],
+  subject: Subject,
+  base: string,
+  existingLectures: Map<string, Lecture>,
+): void {
+  for (const ep of episodes) {
+    const existing = existingLectures.get(ep.id)
+    if (existing?.status === 'Done') continue
+
+    discovered.push({
+      id: ep.id,
+      title: ep.title,
+      courseId: subject.id,
+      moodleUrl: lecturePageUrl(ep.id, base),
+      opencastUrl: ep.mp4Url,
+      glossary: subject.glossary?.trim() || undefined,
+    })
+  }
+}
+
 /**
  * Discover lectures via media.jku.at (`/search/series.json`, `/search/episode.json`).
  * Each Notion Subject needs **Media Course ID** (series name like `2026S344090`, LU digits only, or Engage/play URL),
@@ -175,13 +210,14 @@ export async function discoverLecturesFromMedia(
 
     console.log(`[discover] Subject: ${subject.name}`)
 
-    if (!subject.mediaCourseId.trim() && !subject.mediaSeriesId.trim()) {
+    const pinned = parseUuid(subject.mediaSeriesId.trim())
+    const courseStr = subject.mediaCourseId.trim()
+
+    if (!courseStr && !subject.mediaSeriesId.trim()) {
       console.warn(`[discover]   Skip: add "Media Course ID" or "Media Series ID" in Notion`)
       continue
     }
 
-    const pinned = parseUuid(subject.mediaSeriesId.trim())
-    const courseStr = subject.mediaCourseId.trim()
     const episodeHintUuid = !pinned ? extractEpisodeHintUuid(courseStr) : null
 
     let filterKey: ReturnType<typeof parseMediaCourseKey> =
@@ -290,6 +326,20 @@ export async function discoverLecturesFromMedia(
     }
 
     if (!series) {
+      if (courseStr) {
+        console.log(`[discover]   No series — trying episode search q=«${courseStr}»`)
+        try {
+          const raw = await fetchEpisodesByQuery(base, courseStr)
+          const kept = filterEpisodesBySemesterHint(raw, semester)
+          console.log(`[discover]   Episodes ${raw.length} → kept after semester hint: ${kept.length}`)
+          appendDiscoveredEpisodes(discovered, kept, subject, base, existingLectures)
+        }
+        catch (e) {
+          console.error(`[discover]   Episode search failed:`, e)
+        }
+        continue
+      }
+
       console.warn(
         episodeHintUuid
           ? `[discover]   No OpenCast lookup for mediapackage ${episodeHintUuid} (anonymous search empty). Paste the same URL into Media Course ID, set MEDIA_SESSION_COOKIE from a logged-in browser, or pin Media Series ID (OpenCast series UUID). Original course key sem ${filterKey.semester} LU ${filterKey.lu || '(none)'}`
@@ -325,19 +375,7 @@ export async function discoverLecturesFromMedia(
 
     console.log(`[discover]   Episodes ${episodes.length} → kept after LU/semester filter: ${kept.length}`)
 
-    for (const ep of kept) {
-      const existing = existingLectures.get(ep.id)
-      if (existing?.status === 'Done') continue
-
-      discovered.push({
-        id: ep.id,
-        title: ep.title,
-        courseId: subject.id,
-        moodleUrl: lecturePageUrl(ep.id, base),
-        opencastUrl: ep.mp4Url,
-        glossary: subject.glossary?.trim() || undefined,
-      })
-    }
+    appendDiscoveredEpisodes(discovered, kept, subject, base, existingLectures)
   }
 
   discovered.sort((a, b) => b.id.localeCompare(a.id))
