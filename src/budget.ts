@@ -25,7 +25,7 @@ function parsedGroqHourlyAudioSecondsCap(): number {
   if (typeof process === 'undefined') return DEFAULT_GROQ_HOURLY_AUDIO_SECONDS
   const raw = process.env.GROQ_HOURLY_AUDIO_SECONDS?.trim()
     ?? process.env.GROQ_HOUR_AUDIO_SECONDS?.trim()
-    ?? process.env.GROQ_DIALY_AUDIO_SECONDS?.trim()
+    ?? process.env.GROQ_DIALY_AUDIO_SECONDS?.trim() // deprecated typo alias (hourly cap only)
     ?? ''
   if (!raw) return DEFAULT_GROQ_HOURLY_AUDIO_SECONDS
   const n = Number(raw)
@@ -43,7 +43,7 @@ function parsedGroqDailyAudioSecondsCap(): number {
 function parsedGroqDailyRequestLimit(): number {
   if (typeof process === 'undefined') return DEFAULT_GROQ_DAILY_REQUESTS
   const raw = process.env.GROQ_DAILY_REQUESTS?.trim()
-    ?? process.env.GROQ_DIALY_REQUESTS?.trim()
+    ?? process.env.GROQ_DIALY_REQUESTS?.trim() // deprecated typo alias
     ?? ''
   if (!raw) return DEFAULT_GROQ_DAILY_REQUESTS
   const n = Number(raw)
@@ -53,7 +53,7 @@ function parsedGroqDailyRequestLimit(): number {
 function parsedGeminiDailyRequestLimit(): number {
   if (typeof process === 'undefined') return DEFAULT_GEMINI_DAILY_REQUESTS
   const raw = process.env.GEMINI_DAILY_REQUESTS?.trim()
-    ?? process.env.GEMINI_DIALY_REQUESTS?.trim()
+    ?? process.env.GEMINI_DIALY_REQUESTS?.trim() // deprecated typo alias
     ?? ''
   if (!raw) return DEFAULT_GEMINI_DAILY_REQUESTS
   const n = Number(raw)

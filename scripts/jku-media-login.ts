@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * One-time interactive Shibboleth login → writes Playwright `storageState`.
- * Pipe `MEDIA_PLAYWRIGHT_STATE=.cache/jku-media-storage.json` through `.env` so `mediaFetch` replays cookies.
+ * Pipe `MEDIA_PLAYWRIGHT_STATE=.local/jku-media-storage.json` through `.env` so `mediaFetch` replays cookies.
  *
  * Requires: `bun add -d playwright && bunx playwright install chromium`
  */
@@ -14,7 +14,7 @@ import { chromium } from 'playwright'
 const BASE = ((process.env.MEDIA_BASE_URL || 'https://media.jku.at').trim().replace(/\/+$/, '')
   || 'https://media.jku.at')
 const START = (process.env.MEDIA_LOGIN_URL || '').trim() || BASE
-const OUT = path.resolve(process.env.MEDIA_PLAYWRIGHT_STATE?.trim() || '.cache/jku-media-storage.json')
+const OUT = path.resolve(process.env.MEDIA_PLAYWRIGHT_STATE?.trim() || '.local/jku-media-storage.json')
 
 await fs.mkdir(path.dirname(OUT), { recursive: true })
 

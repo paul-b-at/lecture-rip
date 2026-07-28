@@ -39,8 +39,11 @@ jobs:
       - name: Restore pipeline cache
         uses: actions/cache@v4
         with:
-          path: .cache
-          key: lecture-rip-state-v1
+          # Budget + transcript caches only — never cache Playwright storage state / session cookies.
+          path: |
+            .cache/budget.json
+            .cache/transcripts
+          key: lecture-rip-state-v2
 
       - name: Run pipeline
         env:
@@ -75,16 +78,6 @@ jobs:
           COURSE_FILTER: ${{ inputs.course_filter }}
           FORCE_RERIP: ${{ inputs.force_rerip }}
         run: bun run src/index.ts
-
-      - name: Upload run log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: run-log-${{ github.run_id }}
-          path: |
-            logs/*.log
-            logs/*.json
-          retention-days: 14
 
       - name: Notify on failure
         if: failure()

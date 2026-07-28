@@ -3,6 +3,7 @@ node_modules/
 .env.local
 .auth.json
 .cache/
+.local/
 tmp/
 *.opus
 *.mp4
