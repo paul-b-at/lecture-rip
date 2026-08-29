@@ -103,6 +103,7 @@ function coercePostprocessRaw(raw: unknown): unknown {
     actionItems: stringArray(o.actionItems),
     connections: normalizeConnections(o.connections),
     selfCheck: Array.isArray(o.selfCheck) ? o.selfCheck : [],
+    ankiCards: Array.isArray(o.ankiCards) ? o.ankiCards : [],
   }
 }
 
@@ -147,6 +148,14 @@ const PostprocessInnerSchema = z.object({
     question: z.string(),
     answer: z.string(),
   })),
+  ankiCards: z.array(z.object({
+    type: z.enum(['mc', 'basic', 'cloze']),
+    front: z.string(),
+    options: z.array(z.string()).optional(),
+    correct: z.number().optional(),
+    back: z.string(),
+    tags: z.array(z.string()),
+  })),
 })
 
 export const PostprocessOutputSchema = z.preprocess(coercePostprocessRaw, PostprocessInnerSchema).transform(data => ({
@@ -174,9 +183,19 @@ export const PostprocessOutputSchema = z.preprocess(coercePostprocessRaw, Postpr
     expression: f.expression,
     notes: f.notes?.trim() ?? '',
   })),
+  ankiCards: data.ankiCards,
 }))
 
 export type PostprocessOutput = z.infer<typeof PostprocessOutputSchema>
+
+export interface AnkiCard {
+  type: 'mc' | 'basic' | 'cloze'
+  front: string
+  options?: string[]
+  correct?: number
+  back: string
+  tags: string[]
+}
 
 export interface BudgetState {
   /** UTC calendar day `YYYY-MM-DD`; Groq Whisper **request** + Gemini counters reset at UTC midnight */

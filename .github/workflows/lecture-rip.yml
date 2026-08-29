@@ -21,7 +21,7 @@ concurrency:
 jobs:
   rip:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -39,11 +39,12 @@ jobs:
       - name: Restore pipeline cache
         uses: actions/cache@v4
         with:
-          # Budget + transcript caches only — never cache Playwright storage state / session cookies.
+          # Budget + transcript + Anki collection caches only — never cache Playwright storage state / session cookies.
           path: |
             .cache/budget.json
             .cache/transcripts
-          key: lecture-rip-state-v2
+            .cache/anki
+          key: lecture-rip-state-v3
 
       - name: Run pipeline
         env:
@@ -78,6 +79,31 @@ jobs:
           COURSE_FILTER: ${{ inputs.course_filter }}
           FORCE_RERIP: ${{ inputs.force_rerip }}
         run: bun run src/index.ts
+
+      - name: Setup Python for Anki
+        if: always()
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Anki dependencies
+        if: always()
+        run: pip install anki genanki requests
+
+      - name: Push Anki cards
+        if: always()
+        env:
+          ANKIWEB_USER: ${{ secrets.ANKIWEB_USER }}
+          ANKIWEB_PASS: ${{ secrets.ANKIWEB_PASS }}
+          ANKI_DECKS_DS_ID: ${{ secrets.ANKI_DECKS_DS_ID }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          if [ -f out/cards.json ]; then
+            python scripts/push_cards.py
+          else
+            echo "[push_cards] out/cards.json not found — skipping"
+          fi
 
       - name: Notify on failure
         if: failure()

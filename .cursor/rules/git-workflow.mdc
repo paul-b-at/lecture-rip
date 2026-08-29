@@ -1,0 +1,26 @@
+---
+description: Commit and open PRs when feature work is complete
+alwaysApply: true
+---
+
+# Git workflow (lecture-rip)
+
+When a feature or task is **complete** (implementation done, types check, no obvious blockers):
+
+1. **Commit** on a feature branch — do not wait to be asked.
+2. **Push** and **open a PR** via `gh pr create` unless the user said "don't push" / "no PR" / "commit only".
+
+Skip commits/PRs for question-only, review-only, or explicitly local/experimental work.
+
+## Safety (unchanged)
+
+- NEVER update git config
+- NEVER force-push to main/master
+- NEVER skip hooks unless the user explicitly requests it
+- NEVER commit secrets (`.env`, credentials)
+- NEVER push unless opening a PR or the user asked to push
+- Prefer amend only per standard amend rules (your commit, unpushed, user requested or hook fix)
+
+## PR flow
+
+Follow the creating-pull-requests user rule: branch → push `-u` → `gh pr create` with Summary + Test plan.

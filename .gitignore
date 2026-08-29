@@ -2,7 +2,9 @@ node_modules/
 .env
 .env.local
 .auth.json
+out/
 .cache/
+__pycache__/
 .local/
 tmp/
 *.opus
