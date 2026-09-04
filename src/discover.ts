@@ -1,4 +1,5 @@
 import type { Lecture, Subject } from './types'
+import { slugifyCourseName } from './cards'
 import {
   normalizeMediaBase,
   extractEpisodeHintUuid,
@@ -114,6 +115,7 @@ export interface DiscoveredLecture {
   id: string
   title: string
   courseId: string
+  courseSlug: string
   moodleUrl: string
   opencastUrl: string
   glossary?: string
@@ -152,6 +154,7 @@ function appendDiscoveredEpisodes(
       id: ep.id,
       title: ep.title,
       courseId: subject.id,
+      courseSlug: slugifyCourseName(subject.name),
       moodleUrl: lecturePageUrl(ep.id, base),
       opencastUrl: ep.mp4Url,
       glossary: subject.glossary?.trim() || undefined,

@@ -11,10 +11,11 @@ Each run walks every Subject in Notion and processes lectures that are not yet *
 1. **Discover** — resolve OpenCast series/episodes from Subjects (`Media Course ID` / `Media Series ID`) via `/search/series.json` and `/search/episode.json` (no Moodle login required for public courses).
 2. **Download** — fetch the recording, convert to audio with **ffmpeg**.
 3. **Transcribe** — **Groq Whisper** (`whisper-large-v3` by default; downshifts to `whisper-large-v3-turbo` under budget pressure). Optional `--local` / `TRANSCRIBE_LOCAL=true` runs **whisper.cpp** on your machine (`WHISPER_MODEL_PATH`; see `.env.example`) and skips Groq — local runs are **time-chunked** (default **12 min** via `WHISPER_CHUNK_MINUTES`) to avoid repetition on long lectures.
-4. **Postprocess** — **Gemini** generates chapters, summary, and exam hints (model chain in [`src/postprocess.ts`](src/postprocess.ts)).
+4. **Postprocess** — **Gemini** generates chapters, summary, exam hints, and Anki flashcards (model chain in [`src/postprocess.ts`](src/postprocess.ts)).
 5. **Notion** — upsert lecture rows, update **Status**, write the Gemini summary to the lecture **page body** (blocks).
+6. **Anki** — after each run, push generated cards to **AnkiWeb** deck `JKU::{courseSlug}` via headless Python on the runner. On sync/login failure, build an `.apkg` and upload it to the Notion **Anki Decks** database instead. Card generation never fails the lecture pipeline.
 
-**Stack:** Bun + TypeScript · OpenCast discovery · Groq Whisper or whisper.cpp · Gemini · Notion (Lectures DB + Subjects DB) · GitHub Actions (~8 runs/day on the free tier).
+**Stack:** Bun + TypeScript · OpenCast discovery · Groq Whisper or whisper.cpp · Gemini · Notion (Lectures DB + Subjects DB) · AnkiWeb / genanki · GitHub Actions (~8 runs/day on the free tier).
 
 Semester tagging follows OpenCast: **`YYYYW`** (Wintersemester roughly Oct–Feb) vs **`YYYYS`** (Sommersemester Mar–Sep). When **`MEDIA_SEMESTER`** is unset or `auto`, the runner infers "today" in **`MEDIA_SEMESTER_TZ`** (default **`Europe/Vienna`**) so GitHub Actions (UTC clocks) aligns with Austrian term switches ([`src/semester.ts`](src/semester.ts)). Pin with **`MEDIA_SEMESTER=2026S`** when you want that prefix regardless of calendar.
 
@@ -38,6 +39,7 @@ Do not commit `.env` or `.local/jku-media-storage.json`.
 | **Groq** | `GROQ_API_KEY`, `GROQ_HOURLY_AUDIO_SECONDS` | Cloud transcription (default). Optional caps: `GROQ_DAILY_AUDIO_SECONDS`, `GROQ_DAILY_REQUESTS`, `GROQ_INTER_CHUNK_MS`. |
 | **Local whisper** | `TRANSCRIBE_LOCAL`, `WHISPER_MODEL_PATH`, `WHISPER_CLI`, `WHISPER_CHUNK_MINUTES` | Skips Groq; postprocessing stays on Gemini. |
 | **Gemini** | `GEMINI_API_KEY`, `GEMINI_DAILY_REQUESTS` | Postprocessing only. |
+| **Anki** | `ANKIWEB_USER`, `ANKIWEB_PASS`, `ANKI_DECKS_DS_ID` | AnkiWeb sync + Notion Anki Decks fallback (Actions only). |
 | **media.jku.at** | `MEDIA_BASE_URL`, `MEDIA_SEMESTER`, `MEDIA_SEMESTER_TZ`, `MEDIA_SESSION_COOKIE`, `MEDIA_PLAYWRIGHT_STATE` | Optional auth for ACL-restricted courses. |
 | **Filters** | `COURSE_FILTER`, `FORCE_RERIP` | Regex filter on Subject name; re-rip lectures already at Done. |
 
@@ -69,7 +71,9 @@ Some courses stay out of **anonymous** `/search/` results (nothing matches `2026
 
 ### GitHub Actions
 
-The workflow (`.github/workflows/lecture-rip.yml`) runs on **`ubuntu-latest`** every 3 hours and on manual dispatch. It uses **`actions/cache`** on **`.cache/budget.json`** and **`.cache/transcripts`** only (cache key `lecture-rip-state-v2`; session cookies / Playwright storage state are **not** cached). **Concurrency** `group: lecture-rip` / `cancel-in-progress: false` so queued runs keep consistent quota + transcript state. **`timeout-minutes: 30`** per job — each cron tick is intended to finish quickly after the per-run quotas. Failures ping **`NTFY_TOPIC`** via ntfy.sh (no log artifacts are uploaded).
+The workflow (`.github/workflows/lecture-rip.yml`) runs on **`ubuntu-latest`** every 3 hours and on manual dispatch. It uses **`actions/cache`** on **`.cache/budget.json`**, **`.cache/transcripts`**, and **`.cache/anki`** (cache key `lecture-rip-state-v3`; session cookies / Playwright storage state are **not** cached). **Concurrency** `group: lecture-rip` / `cancel-in-progress: false` so queued runs keep consistent quota + transcript state. **`timeout-minutes: 40`** per job — first AnkiWeb sync can be slow. After the Bun pipeline, a Python step pushes Anki cards (`scripts/push_cards.py`) when `out/cards.json` exists. Failures ping **`NTFY_TOPIC`** via ntfy.sh (no log artifacts are uploaded).
+
+**AnkiWeb smoke test:** Run [`.github/workflows/anki-smoke.yml`](.github/workflows/anki-smoke.yml) manually (`workflow_dispatch`) before enabling Anki sync in production. It verifies `ANKIWEB_USER` / `ANKIWEB_PASS` against AnkiWeb (accounts with **2FA** block non-interactive login).
 
 #### Secrets
 
@@ -93,7 +97,10 @@ The workflow (`.github/workflows/lecture-rip.yml`) runs on **`ubuntu-latest`** e
 | `GROQ_DAILY_REQUESTS` | *(optional)* Whisper **requests per UTC day** (default **`2000`**) |
 | `GROQ_INTER_CHUNK_MS` | *(optional)* delay between chunk requests (`transcribe`); helps avoid Groq burst **429**s on multi-chunk opus files |
 | `GEMINI_DAILY_REQUESTS` | *(optional)* local daily cap on **postprocess** `generateContent` (default **`500`**) |
-| `NTFY_TOPIC` | ntfy topic for failures |
+| `NTFY_TOPIC` | ntfy topic for failures and Anki `.apkg` fallback pings |
+| `ANKIWEB_USER` | AnkiWeb username (email) for headless sync |
+| `ANKIWEB_PASS` | AnkiWeb password — **no 2FA** on this account for CI login |
+| `ANKI_DECKS_DS_ID` | Notion **Anki Decks** database ID (`.apkg` fallback + sync status) |
 | `MEDIA_BASE_URL` | *(optional)* default `https://media.jku.at` |
 | `MEDIA_SESSION_COOKIE` | *(optional)* full `Cookie` header for MEDIA_BASE_URL; use when ACL blocks anonymous `/search/` |
 | `MEDIA_PLAYWRIGHT_STATE` | *(optional)* Playwright storage state JSON path (interactive login only makes sense locally) |

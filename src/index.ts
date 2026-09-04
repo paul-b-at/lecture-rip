@@ -1,4 +1,5 @@
 import { BudgetTracker } from './budget'
+import { appendLectureCards, extractLectureDate } from './cards'
 import { discoverLecturesFromMedia } from './discover'
 import { cleanup, downloadAndConvert, getAudioDuration } from './download'
 import {
@@ -173,7 +174,7 @@ async function main() {
 
 async function processLecture(
   pageId: string,
-  lec: { id: string; title: string; opencastUrl: string; glossary?: string; durationSeconds?: number },
+  lec: { id: string; title: string; courseSlug: string; opencastUrl: string; glossary?: string; durationSeconds?: number },
   currentStatus: Stage,
   budget: BudgetTracker,
 ): Promise<void> {
@@ -261,6 +262,13 @@ async function processLecture(
     await writePostprocessResults(pageId, output)
     await setStage(pageId, 'Postprocessed')
     currentStatus = 'Postprocessed'
+
+    await appendLectureCards({
+      lectureId: lec.id,
+      courseSlug: lec.courseSlug,
+      lectureDate: extractLectureDate(lec.title),
+      cards: output.ankiCards,
+    })
   }
 
   await setStage(pageId, 'Done')

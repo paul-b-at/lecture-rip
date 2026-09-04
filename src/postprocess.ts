@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai'
+import { validateAnkiCards } from './cards'
 import { PostprocessOutputSchema, isQuotaError, QuotaError, type PostprocessOutput } from './types'
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
@@ -127,6 +128,37 @@ const RESPONSE_SCHEMA = {
 				required: ['question', 'answer'] as string[],
 			},
 		},
+		ankiCards: {
+			type: SchemaType.ARRAY,
+			description: '8-25 Anki flashcards for active recall (~2 per chapter)',
+			items: {
+				type: SchemaType.OBJECT,
+				properties: {
+					type: {
+						type: SchemaType.STRING,
+						description: 'Card type: mc, basic, or cloze',
+						enum: ['mc', 'basic', 'cloze'],
+					},
+					front: { type: SchemaType.STRING, description: 'Question prompt, or cloze text with {{c1::answer}}' },
+					options: {
+						type: SchemaType.ARRAY,
+						description: 'Four answer options for mc cards; empty array for basic/cloze',
+						items: { type: SchemaType.STRING },
+					},
+					correct: {
+						type: SchemaType.NUMBER,
+						description: 'Zero-based index of correct mc option (0-3); use 0 for basic/cloze',
+					},
+					back: { type: SchemaType.STRING, description: 'Explanation / answer back side' },
+					tags: {
+						type: SchemaType.ARRAY,
+						description: 'Short topic tags',
+						items: { type: SchemaType.STRING },
+					},
+				},
+				required: ['type', 'front', 'options', 'correct', 'back', 'tags'] as string[],
+			},
+		},
 	},
 	required: [
 		'tldr',
@@ -137,6 +169,7 @@ const RESPONSE_SCHEMA = {
 		'examHints',
 		'actionItems',
 		'selfCheck',
+		'ankiCards',
 	] as string[],
 }
 const SYSTEM_PROMPT = `You are a university lecture note assistant. Given a transcript of a lecture, produce structured study notes optimized for both quick review and active recall.
@@ -156,6 +189,7 @@ Rules:
 - Action Items: homework, readings, deadlines, or tasks the lecturer assigned or suggested.
 - Connections: links to other material. "buildsOn" = prerequisites or earlier lectures referenced. "leadsTo" = future topics this sets up. "related" = other subjects this shows up in. Only include items the transcript actually mentions or strongly implies. Leave arrays empty if nothing fits.
 - Self-Check: 3-5 active-recall questions with short reference answers grounded strictly in the transcript.
+- Anki Cards: Generate 8-25 flashcards total (~2 per detected chapter, clamped). Target ~70% multiple-choice (type "mc") with exactly 4 non-empty options and exactly one correct answer (correct = zero-based index 0-3); seed MC questions from exam hints where possible. ~30% basic or cloze cards drawn from formulas and key definitions. Cloze cards (type "cloze") must use {{c1::hidden text}} syntax in front. Every card needs a concise back (explanation) and 1-3 short tags. For basic/cloze cards set options to [] and correct to 0.
 
 Be precise and factual. Do not hallucinate content not in the transcript. If a section has no relevant content, return an empty array (or omit optional string fields) rather than inventing material.`
 
@@ -172,11 +206,19 @@ Return ONLY a single JSON object (no markdown code fences, no commentary) with k
 - examHints (array of { hint, priority: "likely"|"tricky"|"general" }),
 - actionItems (array of strings),
 - connections ({ buildsOn?, leadsTo?, related?: arrays of strings }),
-- selfCheck (array of { question, answer }).
+- selfCheck (array of { question, answer }),
+- ankiCards (array of { type: "mc"|"basic"|"cloze", front, options: string[4] or [], correct: 0-3, back, tags: string[] }).
 Follow every content rule above; use empty arrays only when the transcript truly has nothing qualifying.`
 
 const STRICT_MIN_FIELDS_NOTE =
-  `\n\nCRITICAL: You MUST include non-empty values for tldr, summary, chapters, examHints, actionItems, deepDive, selfCheck, and keyConcepts. Do not return empty arrays for required sections unless the transcript truly lacks all material for that section.`
+  `\n\nCRITICAL: You MUST include non-empty values for tldr, summary, chapters, examHints, actionItems, deepDive, selfCheck, keyConcepts, and ankiCards (8-25 cards). Do not return empty arrays for required sections unless the transcript truly lacks all material for that section.`
+
+function finalizePostprocessOutput(data: PostprocessOutput): PostprocessOutput {
+  const { cards, dropped } = validateAnkiCards(data.ankiCards)
+  if (dropped > 0)
+    console.warn(`[postprocess] Dropped ${dropped} invalid Anki card(s) after schema parse`)
+  return { ...data, ankiCards: cards }
+}
 
 /** Gemini Flash first; then Gemini 2.5; last `gemma-4-31b-it` on 429/quota or transient overload (`postprocess` loop). Gemma retries without schema when structured output fails. */
 const MODELS = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemma-4-31b-it'] as const
@@ -315,10 +357,10 @@ async function callWithResponseSchema(modelName: string, transcript: string, cal
     const retryText = stripJsonFence(retryResult.response.text())
     const retryParsed = JSON.parse(retryText)
     const retryValidated = PostprocessOutputSchema.parse(retryParsed)
-    return retryValidated
+    return finalizePostprocessOutput(retryValidated)
   }
 
-  return validated.data
+  return finalizePostprocessOutput(validated.data)
 }
 
 async function callJsonOnlyModel(modelName: string, transcript: string, callbacks?: PostprocessOptions): Promise<PostprocessOutput> {
@@ -349,5 +391,5 @@ async function callJsonOnlyModel(modelName: string, transcript: string, callback
     if (!validated.success) throw validated.error
   }
 
-  return validated.data
+  return finalizePostprocessOutput(validated.data)
 }
