@@ -96,6 +96,22 @@ export function collectCalendarEvents(data: unknown): MoodleEvent[] {
   return [...out.values()]
 }
 
+export interface MoodleAuthState { hasSessionKey: boolean; userId: number; hasLoginLink: boolean }
+/** Moodle's built-in guest account has ID 1 and can have both a sesskey and AJAX access. */
+export function isAuthenticatedMoodleState(state: MoodleAuthState): boolean {
+  return state.hasSessionKey && state.userId > 1 && !state.hasLoginLink
+}
+/** Read only readiness flags; never return the session-key value. */
+function readMoodleAuthState(): MoodleAuthState {
+  const g = globalThis as any
+  return {
+    hasSessionKey: Boolean(g.M?.cfg?.sesskey),
+    userId: Number(g.M?.cfg?.userId ?? g.M?.cfg?.userid ?? 0),
+    hasLoginLink: Boolean(g.document?.querySelector('a[href*="/login/index.php"]')),
+  }
+}
+class MissingMoodleCredentialsError extends Error {}
+
 export class MoodleSession {
   constructor(readonly page: Page) {}
   get context(): BrowserContext { return this.page.context() }
@@ -104,13 +120,16 @@ export class MoodleSession {
     const page = await context.newPage()
     try {
       await page.goto(`${MOODLE}/my/`, { waitUntil: 'domcontentloaded' })
-      const ready = () => page.evaluate(() => Boolean((globalThis as any).M?.cfg?.sesskey && ((globalThis as any).M?.cfg?.userId ?? (globalThis as any).M?.cfg?.userid ?? 0) > 0))
+      const ready = async () => isAuthenticatedMoodleState(await page.evaluate(readMoodleAuthState))
       if (!page.url().startsWith(MOODLE) || !(await ready())) {
+        const user = process.env.JKU_USER?.trim(), pass = process.env.JKU_PASS
+        if (!user || !pass) {
+          const missing = [!user ? 'JKU_USER' : null, !pass ? 'JKU_PASS' : null].filter(Boolean).join(', ')
+          throw new MissingMoodleCredentialsError(`Missing Moodle sign-in environment variables: ${missing}. Add the repository Actions secrets AND map them into the Run pipeline step's env. MEDIA_SESSION_COOKIE does not authenticate Moodle.`)
+        }
         await page.goto(`${MOODLE}/login/index.php`, { waitUntil: 'domcontentloaded' })
         const username = page.locator('#username, input[name="j_username"]').first()
         await username.waitFor({ state: 'visible', timeout: 30_000 })
-        const user = process.env.JKU_USER?.trim(), pass = process.env.JKU_PASS
-        if (!user || !pass) throw new Error('Moodle sign-in requires JKU_USER and JKU_PASS; provision repository secrets, never commit credentials')
         await username.fill(user)
         await page.locator('#password, input[name="j_password"]').first().fill(pass)
         const noRemember = page.locator('#donotcache')
@@ -118,10 +137,11 @@ export class MoodleSession {
         await page.locator('button[name="_eventId_proceed"], button[type="submit"], input[type="submit"]').first().click()
         await page.waitForURL(`${MOODLE}/**`, { timeout: 60_000, waitUntil: 'domcontentloaded' })
       }
-      await page.waitForFunction(() => Boolean((globalThis as any).M?.cfg?.sesskey && ((globalThis as any).M?.cfg?.userId ?? (globalThis as any).M?.cfg?.userid ?? 0) > 0), { timeout: 30_000 })
+      if (!(await ready())) throw new Error('Moodle returned a guest or unauthenticated page after sign-in')
       return new MoodleSession(page)
-    } catch {
+    } catch (error) {
       await page.close()
+      if (error instanceof MissingMoodleCredentialsError) throw error
       // Do not include Playwright errors: they can contain SAML/session-bearing URLs.
       throw new Error('Moodle sign-in failed: verify JKU secrets and any MFA requirement. No fallback to an empty success; security requirements must not be bypassed.')
     }
@@ -130,7 +150,7 @@ export class MoodleSession {
   async ajax<T>(method: string, args: Record<string, unknown>): Promise<T> {
     return this.page.evaluate(async ({ method, args }) => {
       const g = globalThis as any
-      if (!g.M?.cfg?.sesskey || !(g.M?.cfg?.userId ?? g.M?.cfg?.userid)) throw new Error('Moodle session expired')
+      if (!g.M?.cfg?.sesskey || Number(g.M?.cfg?.userId ?? g.M?.cfg?.userid ?? 0) <= 1 || g.document?.querySelector('a[href*="/login/index.php"]')) throw new Error('Moodle session is guest, unauthenticated or expired')
       const r = await fetch('/lib/ajax/service.php?' + new URLSearchParams({ sesskey: g.M.cfg.sesskey, info: method }), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify([{ index: 0, methodname: method, args }]), signal: AbortSignal.timeout(30_000),

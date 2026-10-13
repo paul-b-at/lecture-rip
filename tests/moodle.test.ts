@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { MoodleSession, courseNumbers, currentSemester, parseEpisodeScript, collectCalendarEvents, selectSemesterCourses, courseSemesterLabels } from '../src/moodle'
+import { MoodleSession, courseNumbers, currentSemester, parseEpisodeScript, collectCalendarEvents, selectSemesterCourses, courseSemesterLabels, isAuthenticatedMoodleState } from '../src/moodle'
 
 describe('Moodle shared adapter', () => {
   test('JKU calendar transitions use Vienna, including UTC boundary', () => {
@@ -76,4 +76,25 @@ test('semester selection supports suffix-only and case/space variations', () => 
 test('course errors distinguish empty account from wrong term without publishing course names', () => {
   expect(() => selectSemesterCourses([], '2026W')).toThrow('0 enrolled courses')
   expect(() => selectSemesterCourses([{ id: 1, shortname: '2026S365075', fullname: 'private title' }], '2026W')).toThrow('Available terms: 2026S:1')
+})
+
+test('Moodle guest sesskey does not count as authentication', () => {
+  expect(isAuthenticatedMoodleState({ hasSessionKey: true, userId: 1, hasLoginLink: false })).toBe(false)
+  expect(isAuthenticatedMoodleState({ hasSessionKey: true, userId: 0, hasLoginLink: true })).toBe(false)
+  expect(isAuthenticatedMoodleState({ hasSessionKey: true, userId: 200, hasLoginLink: true })).toBe(false)
+  expect(isAuthenticatedMoodleState({ hasSessionKey: false, userId: 200, hasLoginLink: false })).toBe(false)
+  expect(isAuthenticatedMoodleState({ hasSessionKey: true, userId: 200, hasLoginLink: false })).toBe(true)
+})
+test('guest session with missing workflow credentials fails before course discovery', async () => {
+  const originalUser = process.env.JKU_USER, originalPass = process.env.JKU_PASS
+  delete process.env.JKU_USER; delete process.env.JKU_PASS
+  let closed = false
+  const page = { goto: async () => {}, url: () => 'https://moodle.jku.at/my/', evaluate: async () => ({ hasSessionKey: true, userId: 1, hasLoginLink: true }), close: async () => { closed = true } }
+  try {
+    await expect(MoodleSession.open({ newPage: async () => page } as any)).rejects.toThrow('Missing Moodle sign-in environment variables: JKU_USER, JKU_PASS')
+    expect(closed).toBe(true)
+  } finally {
+    if (originalUser === undefined) delete process.env.JKU_USER; else process.env.JKU_USER = originalUser
+    if (originalPass === undefined) delete process.env.JKU_PASS; else process.env.JKU_PASS = originalPass
+  }
 })
