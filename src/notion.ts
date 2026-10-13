@@ -253,6 +253,9 @@ export async function fetchSubjects(): Promise<Subject[]> {
           || getUrl(page, SP.mediaSeriesId)
           || extractFormulaUuid(page, SP.mediaSeriesId),
         glossary: getRichText(page, SP.glossary),
+        courseNumber: getRichText(page, 'Course Number'),
+        ueCourseNumber: getRichText(page, 'UE Course Number'),
+        semester: page.properties?.Semester?.select?.name?.match(/\d{4}[WS]/i)?.[0]?.toUpperCase(),
       })
     }
 

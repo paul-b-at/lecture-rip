@@ -1,5 +1,8 @@
 # lecture-rip
 
+> **Moodle-first update:** scheduled discovery now uses an authenticated Moodle session. See [rollout and preview instructions](docs/moodle-rollout.md) before activation. The legacy media/myJKU paths below remain available only as explicit rollback options.
+
+
 lecture-rip is an automated pipeline for JKU lecture recordings on [media.jku.at](https://media.jku.at). It discovers new episodes, transcribes audio with **Groq Whisper** (or optional local **whisper.cpp**), post-processes transcripts with **Gemini**, and writes structured notes to a Notion **Lectures** database. Run it locally with Bun, or on a schedule via **GitHub Actions** (every 3 hours, `0 */3 * * *` UTC).
 
 ![lecture-rip](https://github.com/paul-b-at/lecture-rip/actions/workflows/lecture-rip.yml/badge.svg)
@@ -8,7 +11,7 @@ lecture-rip is an automated pipeline for JKU lecture recordings on [media.jku.at
 
 Each run walks every Subject in Notion and processes lectures that are not yet **Done**:
 
-1. **Discover** — resolve OpenCast series/episodes from Subjects (`Media Course ID` / `Media Series ID`) via `/search/series.json` and `/search/episode.json` (no Moodle login required for public courses).
+1. **Discover** — sign into Moodle, map enrolled current-semester courses to Subjects by their course numbers, enumerate individual/collection Opencast activities and authorize recordings through Moodle LTI. Public media search remains available via `RECORDING_SOURCE=media` as an explicit rollback.
 2. **Download** — fetch the recording, convert to audio with **ffmpeg**.
 3. **Transcribe** — **Groq Whisper** (`whisper-large-v3` by default; downshifts to `whisper-large-v3-turbo` under budget pressure). Optional `--local` / `TRANSCRIBE_LOCAL=true` runs **whisper.cpp** on your machine (`WHISPER_MODEL_PATH`; see `.env.example`) and skips Groq — local runs are **time-chunked** (default **12 min** via `WHISPER_CHUNK_MINUTES`) to avoid repetition on long lectures.
 4. **Postprocess** — **Gemini** generates chapters, summary, exam hints, and Anki flashcards (model chain in [`src/postprocess.ts`](src/postprocess.ts)).
@@ -35,6 +38,7 @@ Do not commit `.env` or `.local/jku-media-storage.json`.
 
 | Section | Key vars | Notes |
 |---------|----------|-------|
+| **Moodle** | `JKU_USER`, `JKU_PASS`, `RECORDING_SOURCE=moodle` | Authenticated course/recording discovery. See rollout guide. |
 | **Notion** | `NOTION_TOKEN`, `LECTURES_DS_ID`, `SUBJECTS_DS_ID` | Required. Column title overrides via `NOTION_LECTURES_*` / `NOTION_SUBJECTS_*` (see `.env.example`). |
 | **Groq** | `GROQ_API_KEY`, `GROQ_HOURLY_AUDIO_SECONDS` | Cloud transcription (default). Optional caps: `GROQ_DAILY_AUDIO_SECONDS`, `GROQ_DAILY_REQUESTS`, `GROQ_INTER_CHUNK_MS`. |
 | **Local whisper** | `TRANSCRIBE_LOCAL`, `WHISPER_MODEL_PATH`, `WHISPER_CLI`, `WHISPER_CHUNK_MINUTES` | Skips Groq; postprocessing stays on Gemini. |
@@ -161,4 +165,4 @@ Local counters in `.cache/budget.json` gate Groq and Gemini usage. **`actions/ca
 
 - **`GROQ_DAILY_AUDIO_SECONDS`** is the daily decoded-audio cap (default 28800). It is **not** an alias for the hourly cap — use **`GROQ_HOURLY_AUDIO_SECONDS`** for that.
 - Deprecated typo env names (`GROQ_DIALY_AUDIO_SECONDS`, `GROQ_DIALY_REQUESTS`, `GEMINI_DIALY_REQUESTS`) still work as silent fallbacks in [`src/budget.ts`](src/budget.ts) but are not documented above; migrate to the correctly spelled names.
-- **`JKU_USER` / `JKU_PASS`** are no longer used.
+- **`JKU_USER` / `JKU_PASS`** are required for the new Moodle-first source; they remain unused in the legacy `RECORDING_SOURCE=media` path.
