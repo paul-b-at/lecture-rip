@@ -28,7 +28,7 @@ test('done recordings skipped, force rerip includes them', async () => {
   expect(launches).toBe(1)
 })
 test('missing current courses fails, not a green empty sync', async () => {
-  await expect(discoverLecturesFromMoodle({ courses: async () => [] } as any, [subject], new Map(), { semester: '2026W' })).rejects.toThrow('No enrolled')
+  await expect(discoverLecturesFromMoodle({ courses: async () => [] } as any, [subject], new Map(), { semester: '2026W' })).rejects.toThrow('0 enrolled courses')
 })
 
 test('empty published recording collections do not attempt a player launch', async () => {

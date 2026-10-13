@@ -1,4 +1,4 @@
-import { MoodleSession, currentSemester, courseNumbers, normalizeCourseNumber, parseEpisodeScript, type MoodleCourse } from './moodle'
+import { MoodleSession, currentSemester, courseNumbers, normalizeCourseNumber, parseEpisodeScript, selectSemesterCourses, type MoodleCourse } from './moodle'
 import type { DiscoveredLecture } from './discover'
 import type { Lecture, Subject } from './types'
 
@@ -38,8 +38,7 @@ export async function discoverLecturesFromMoodle(
 ): Promise<DiscoveredLecture[]> {
   const semester = opts.semester ?? currentSemester()
   const filter = opts.courseFilterRegex ? new RegExp(opts.courseFilterRegex, 'i') : null
-  const courses = (await session.courses()).filter(c => new RegExp(`(?:^|[^0-9])${semester}(?:[^0-9]|[0-9])`, 'i').test(c.shortname + ' ' + c.fullname))
-  if (!courses.length) throw new Error(`No enrolled Moodle courses for ${semester}; check term/session before syncing`)
+  const courses = selectSemesterCourses(await session.courses(), semester)
   const out = new Map<string, DiscoveredLecture>()
   let mapped = 0, activities = 0, recordingCount = 0
   for (const course of courses) {

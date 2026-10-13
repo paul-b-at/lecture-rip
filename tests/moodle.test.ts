@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { MoodleSession, courseNumbers, currentSemester, parseEpisodeScript, collectCalendarEvents } from '../src/moodle'
+import { MoodleSession, courseNumbers, currentSemester, parseEpisodeScript, collectCalendarEvents, selectSemesterCourses, courseSemesterLabels } from '../src/moodle'
 
 describe('Moodle shared adapter', () => {
   test('JKU calendar transitions use Vienna, including UTC boundary', () => {
@@ -39,11 +39,41 @@ describe('Moodle shared adapter', () => {
   })
   test('course list pagination handles multiple full pages', async () => {
     const s = new MoodleSession({} as any)
-    s.ajax = async (_m, a) => ({ courses: a.offset === 0 ? Array.from({ length: 50 }, (_, i) => ({ id: i + 1 })) : [{ id: 51 }], nextoffset: 50 }) as any
+    s.ajax = async (_m, a) => ({ courses: a.offset === 0 ? Array.from({ length: 50 }, (_, i) => ({ id: i + 1 })) : a.offset === 50 ? [{ id: 51 }] : [], nextoffset: a.offset === 0 ? 50 : 51 }) as any
     expect((await s.courses()).length).toBe(51)
   })
   test('media cookies cannot be forwarded to an arbitrary host', async () => {
     const s = new MoodleSession({} as any)
     await expect(s.fetchMedia('https://example.com/private')).rejects.toThrow('approved JKU hosts')
   })
+})
+
+test('course pagination follows cursor across partial and empty intermediate pages', async () => {
+  const session = new MoodleSession({} as any)
+  const calls: any[] = []
+  session.ajax = async (_method, args) => {
+    calls.push(args)
+    if (args.offset === 0) return { courses: [{ id: 1 }], nextoffset: 50 } as any
+    if (args.offset === 50) return { courses: [], nextoffset: 100 } as any
+    if (args.offset === 100) return { courses: [{ id: 2 }], nextoffset: 101 } as any
+    return { courses: [], nextoffset: 101 } as any
+  }
+  expect((await session.courses()).map(c => c.id)).toEqual([1, 2])
+  expect(calls.map(c => c.offset)).toEqual([0, 50, 100, 101])
+  expect(calls.every(c => c.classification === 'allincludinghidden')).toBe(true)
+})
+test('course pagination rejects nonempty stalled cursor', async () => {
+  const session = new MoodleSession({} as any)
+  session.ajax = async () => ({ courses: [{ id: 1 }], nextoffset: 0 }) as any
+  await expect(session.courses()).rejects.toThrow('did not advance')
+})
+test('semester selection supports suffix-only and case/space variations', () => {
+  const c = { id: 1, shortname: 'custom', fullname: '365.075, VL Course, 2026W' }
+  expect(selectSemesterCourses([c], '2026W')).toEqual([c])
+  expect(courseSemesterLabels({ shortname: '2026 w365075', fullname: 'Course' })).toEqual(['2026W'])
+  expect(courseSemesterLabels({ shortname: '2026Winter', fullname: 'Course' })).toEqual([])
+})
+test('course errors distinguish empty account from wrong term without publishing course names', () => {
+  expect(() => selectSemesterCourses([], '2026W')).toThrow('0 enrolled courses')
+  expect(() => selectSemesterCourses([{ id: 1, shortname: '2026S365075', fullname: 'private title' }], '2026W')).toThrow('Available terms: 2026S:1')
 })

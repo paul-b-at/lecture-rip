@@ -48,6 +48,25 @@ export function courseNumbers(course: Pick<MoodleCourse, 'fullname' | 'shortname
   return [...out]
 }
 
+/** Semester labels only; never log raw account details or session values. */
+export function courseSemesterLabels(course: Pick<MoodleCourse, 'fullname' | 'shortname'>): string[] {
+  const text = `${course.shortname ?? ''} ${course.fullname ?? ''}`
+  return [...new Set([...text.matchAll(/(?:^|[^0-9])(\d{4})\s*([WS])(?=$|[^a-z])/gi)].map(m => `${m[1]}${m[2]}`.toUpperCase()))]
+}
+
+export function selectSemesterCourses(courses: MoodleCourse[], semester: string): MoodleCourse[] {
+  if (!/^\d{4}[WS]$/.test(semester)) throw new Error('Invalid Moodle semester label')
+  const labels = new Map<string, number>()
+  for (const course of courses) for (const term of courseSemesterLabels(course)) labels.set(term, (labels.get(term) ?? 0) + 1)
+  const selected = courses.filter(c => courseSemesterLabels(c).includes(semester))
+  const unlabelled = courses.filter(c => !courseSemesterLabels(c).length).length
+  const summary = [...labels.entries()].sort().map(([term, count]) => `${term}:${count}`).join(', ') || '(none)'
+  console.log(`[moodle] Course discovery: enrolled=${courses.length}, target=${semester}, matched=${selected.length}, terms=${summary}, unlabelled=${unlabelled}`)
+  if (!courses.length) throw new Error('Moodle returned 0 enrolled courses, including dashboard-hidden courses. Verify the JKU account used by Actions and its Moodle enrolments; authentication alone does not prove the correct account.')
+  if (!selected.length) throw new Error(`Moodle returned ${courses.length} enrolled courses, but none match ${semester}. Available terms: ${summary}; unlabelled=${unlabelled}. Verify the Actions JKU account and course labels; do not change the semester blindly.`)
+  return selected
+}
+
 /** Extract JSON, never eval instructor-supplied JavaScript. */
 export function parseEpisodeScript(script: string | null): any | null {
   if (!script) return null
@@ -127,10 +146,14 @@ export class MoodleSession {
     const out = new Map<number, MoodleCourse>()
     let offset = 0
     while (true) {
-      const data = await this.ajax<{ courses: MoodleCourse[]; nextoffset: number }>('core_course_get_enrolled_courses_by_timeline_classification', { classification: 'all', limit: 50, offset, sort: 'fullname' })
+      const data = await this.ajax<{ courses: MoodleCourse[]; nextoffset: number }>('core_course_get_enrolled_courses_by_timeline_classification', { classification: 'allincludinghidden', limit: 50, offset, sort: 'fullname' })
+      if (!Array.isArray(data.courses) || !Number.isInteger(data.nextoffset) || data.nextoffset < offset) throw new Error('Invalid Moodle course pagination response')
       for (const c of data.courses) out.set(c.id, c)
-      if (data.courses.length < 50) break
-      if (data.nextoffset <= offset) throw new Error('Moodle course pagination did not advance')
+      // nextoffset counts processed source rows, not exported rows: short/empty filtered pages can have more data.
+      if (data.nextoffset === offset) {
+        if (data.courses.length) throw new Error('Moodle course pagination did not advance')
+        break
+      }
       offset = data.nextoffset
     }
     return [...out.values()]
