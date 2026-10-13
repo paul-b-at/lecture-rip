@@ -35,7 +35,10 @@ jobs:
 
       - name: Install deps
         run: bun install --frozen-lockfile
-
+        
+      - name: Install Chromium for Moodle
+        run: bunx playwright install --with-deps chromium
+        
       - name: Restore pipeline cache
         uses: actions/cache@v4
         with:
@@ -48,6 +51,8 @@ jobs:
 
       - name: Run pipeline
         env:
+          JKU_USER: ${{ secrets.JKU_USER }}
+          JKU_PASS: ${{ secrets.JKU_PASS }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           LECTURES_DS_ID: ${{ secrets.LECTURES_DS_ID }}
           SUBJECTS_DS_ID: ${{ secrets.SUBJECTS_DS_ID }}

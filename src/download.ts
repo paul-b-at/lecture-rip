@@ -7,15 +7,16 @@ import { pipeline } from 'node:stream/promises'
 
 const TMP_DIR = 'tmp'
 
-export async function downloadAndConvert(opencastUrl: string, lectureId: string): Promise<string> {
+export async function downloadAndConvert(opencastUrl: string, lectureId: string, fetchMedia: (url: string) => Promise<Response> = fetch): Promise<string> {
   await mkdir(TMP_DIR, { recursive: true })
 
   const mp4Path = `${TMP_DIR}/${lectureId}.mp4`
   const opusPath = `${TMP_DIR}/${lectureId}.opus`
 
   // Download MP4 (stream to disk — avoid buffering entire file in RAM)
-  console.log(`[download] Fetching: ${opencastUrl}`)
-  const response = await fetch(opencastUrl)
+  console.log(`[download] Fetching recording ${lectureId} from ${new URL(opencastUrl).hostname}`)
+  const response = await fetchMedia(opencastUrl)
+  if (response.ok && !/video|audio|octet-stream/i.test(response.headers.get('content-type') ?? '')) throw new Error('Media download returned a non-media response (login may have expired)')
   if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`)
 
   if (response.body != null)

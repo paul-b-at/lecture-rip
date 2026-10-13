@@ -1,6 +1,9 @@
 import { BudgetTracker } from './budget'
 import { appendLectureCards, extractLectureDate } from './cards'
 import { discoverLecturesFromMedia } from './discover'
+import { discoverLecturesFromMoodle } from './discover-moodle'
+import { launchMoodleBrowser, MoodleSession } from './moodle'
+import { mediaFetch } from './media-jku'
 import { cleanup, downloadAndConvert, getAudioDuration } from './download'
 import {
   fetchExistingLectures,
@@ -23,6 +26,9 @@ import {
 
 const FORCE = process.env.FORCE_RERIP === 'true'
 const COURSE_FILTER = process.env.COURSE_FILTER || undefined
+const DISCOVER_ONLY = process.argv.includes('--discover-only')
+let mediaDownloader: (url: string) => Promise<Response> = mediaFetch
+let moodleContext: Awaited<ReturnType<typeof launchMoodleBrowser>> | undefined
 
 /** CLI `--local` or `TRANSCRIBE_LOCAL=true`: run whisper.cpp on disk instead of Groq API (see WHISPER_MODEL_PATH). */
 const TRANSCRIBE_LOCAL =
@@ -123,9 +129,23 @@ async function main() {
   const existingLectures = await fetchExistingLectures()
   console.log(`[lecture-rip] ${existingLectures.size} existing lecture rows in Notion`)
 
-  const discovered = await discoverLecturesFromMedia(subjects, existingLectures, {
-    courseFilterRegex: COURSE_FILTER,
-  })
+  const source = process.env.RECORDING_SOURCE?.trim() || 'moodle'
+  if (!['moodle', 'media'].includes(source)) throw new Error('RECORDING_SOURCE must be moodle or media')
+  let discovered
+  if (source === 'moodle') {
+    moodleContext = await launchMoodleBrowser()
+    const session = await MoodleSession.open(moodleContext)
+    mediaDownloader = session.fetchMedia
+    discovered = await discoverLecturesFromMoodle(session, subjects, existingLectures, {
+      semester: semesterInfo.semester, courseFilterRegex: COURSE_FILTER, force: FORCE,
+    })
+  } else {
+    discovered = await discoverLecturesFromMedia(subjects, existingLectures, { courseFilterRegex: COURSE_FILTER })
+  }
+  if (DISCOVER_ONLY) {
+    console.log(`[lecture-rip] Discovery-only: ${discovered.length} pending recordings; no Notion writes or AI requests`)
+    return
+  }
 
   const stats: RunStats = { processed: 0, deferred: 0, failed: 0 }
 
@@ -170,6 +190,7 @@ async function main() {
   console.log(`\n[lecture-rip] Run complete.`)
   console.log(`  processed: ${stats.processed}, deferred: ${stats.deferred}, failed: ${stats.failed}`)
   console.log(`  Budget: ${budget.summary()}`)
+  if (stats.failed > 0) process.exitCode = 1
 }
 
 async function processLecture(
@@ -184,7 +205,7 @@ async function processLecture(
 
   if (stageBefore(currentStatus, 'Downloaded')) {
     ensureGroqBudgetBeforeNewHeavyWork(budget, lec.durationSeconds)
-    audioPath = await downloadAndConvert(lec.opencastUrl, lec.id)
+    audioPath = await downloadAndConvert(lec.opencastUrl, lec.id, mediaDownloader)
     await setStage(pageId, 'Downloaded')
     currentStatus = 'Downloaded'
   }
@@ -195,7 +216,7 @@ async function processLecture(
       const exists = await Bun.file(audioPath).exists()
       if (!exists) {
         ensureGroqBudgetBeforeNewHeavyWork(budget, lec.durationSeconds)
-        audioPath = await downloadAndConvert(lec.opencastUrl, lec.id)
+        audioPath = await downloadAndConvert(lec.opencastUrl, lec.id, mediaDownloader)
       }
     }
 
@@ -282,7 +303,7 @@ async function markFailed(pageId: string, error: unknown): Promise<void> {
   await setSkipReason(pageId, `error: ${msg.slice(0, 200)}`)
 }
 
-main().catch(e => {
+main().finally(async () => { await moodleContext?.close() }).catch(e => {
   console.error('[lecture-rip] Fatal error:', e)
   process.exit(1)
 })

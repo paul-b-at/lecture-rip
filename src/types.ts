@@ -41,6 +41,9 @@ export interface Subject {
   /** Optional: pin OpenCast series UUID instead of resolving by series name/LU */
   mediaSeriesId: string
   glossary: string
+  courseNumber?: string
+  ueCourseNumber?: string
+  semester?: string
 }
 
 const examHintPriority = z.enum(['likely', 'tricky', 'general'])
