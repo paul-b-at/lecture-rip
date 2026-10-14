@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, create_autospec, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from anki.collection import Collection
+from anki.sync_pb2 import SyncAuth, SyncCollectionResponse
 
 import anki_smoke
 import push_cards
@@ -90,6 +91,7 @@ class LoginTests(unittest.TestCase):
     @patch.dict(os.environ, {"ANKIWEB_USER": "test@example.invalid", "ANKIWEB_PASS": "test-only"})
     def test_sync_pull_passes_endpoint_and_disables_media(self):
         col = create_autospec(Collection, instance=True)
+        col.sync_collection.return_value = SyncCollectionResponse(required=SyncCollectionResponse.NO_CHANGES)
         auth = push_cards.sync_pull(col)
         col.sync_login.assert_called_once_with("test@example.invalid", "test-only", endpoint=None)
         col.sync_collection.assert_called_once_with(auth, sync_media=False)
@@ -97,6 +99,7 @@ class LoginTests(unittest.TestCase):
     @patch.dict(os.environ, {"ANKIWEB_USER": "test@example.invalid", "ANKIWEB_PASS": "test-only"})
     def test_smoke_passes_endpoint(self):
         col = create_autospec(Collection, instance=True)
+        col.sync_collection.return_value = SyncCollectionResponse(required=SyncCollectionResponse.NO_CHANGES)
         col.decks = MagicMock()
         col.decks.all_names_and_ids.return_value = []
         with tempfile.TemporaryDirectory() as directory, patch.object(anki_smoke, "COLLECTION_PATH", Path(directory) / "collection.anki2"), patch("anki.collection.Collection", return_value=col):
@@ -105,8 +108,51 @@ class LoginTests(unittest.TestCase):
         col.close.assert_called_once()
 
 
+class SyncResultTests(unittest.TestCase):
+    def test_completed_sync_logs_success_and_updates_endpoint(self):
+        col = MagicMock()
+        col.sync_collection.return_value = SyncCollectionResponse(
+            required=SyncCollectionResponse.NO_CHANGES,
+            new_endpoint="https://sync.example.invalid/",
+        )
+        auth = SyncAuth(hkey="test-only")
+        with patch.object(push_cards, "log") as log:
+            push_cards.sync_collection_checked(col, auth, "push")
+        self.assertEqual(auth.endpoint, "https://sync.example.invalid/")
+        log.assert_called_once_with("[push_cards] push sync result: NO_CHANGES")
+        col.full_upload_or_download.assert_not_called()
+
+    def test_every_incomplete_result_refuses_full_sync(self):
+        for state in (SyncCollectionResponse.NORMAL_SYNC, SyncCollectionResponse.FULL_SYNC,
+                      SyncCollectionResponse.FULL_DOWNLOAD, SyncCollectionResponse.FULL_UPLOAD):
+            for phase in ("pull", "push"):
+                with self.subTest(state=state, phase=phase):
+                    col = MagicMock()
+                    col.sync_collection.return_value = SyncCollectionResponse(required=state)
+                    with self.assertRaises(push_cards.SyncConflictError):
+                        push_cards.sync_collection_checked(col, SyncAuth(), phase)
+                    col.full_upload_or_download.assert_not_called()
+
+    @patch.dict(os.environ, {"ANKIWEB_USER": "test@example.invalid", "ANKIWEB_PASS": "test-only"})
+    def test_pull_and_push_reject_full_sync_responses(self):
+        col = MagicMock()
+        col.sync_collection.return_value = SyncCollectionResponse(required=SyncCollectionResponse.FULL_SYNC)
+        with self.assertRaises(push_cards.SyncConflictError):
+            push_cards.sync_pull(col)
+        with self.assertRaises(push_cards.SyncConflictError):
+            push_cards.sync_push(col, SyncAuth())
+
+    @patch.dict(os.environ, {"ANKIWEB_USER": "test@example.invalid", "ANKIWEB_PASS": "test-only"})
+    def test_smoke_does_not_report_incomplete_sync_as_success(self):
+        col = MagicMock()
+        col.sync_collection.return_value = SyncCollectionResponse(required=SyncCollectionResponse.FULL_DOWNLOAD)
+        with tempfile.TemporaryDirectory() as directory, patch.object(anki_smoke, "COLLECTION_PATH", Path(directory) / "collection.anki2"), patch("anki.collection.Collection", return_value=col):
+            self.assertEqual(anki_smoke.main(), 1)
+        col.close.assert_called_once()
+
+
 class DeliveryTests(unittest.TestCase):
-    def run_delivery(self, *, pull_error=None, push_error=None, fallback=True, missing_anki=False, card_failures=0, batch_error=None):
+    def run_delivery(self, *, pull_error=None, push_error=None, fallback=True, missing_anki=False, card_failures=0, batch_error=None, incomplete_phase=None):
         col = MagicMock()
         with ExitStack() as stack:
             directory = stack.enter_context(tempfile.TemporaryDirectory())
@@ -115,8 +161,15 @@ class DeliveryTests(unittest.TestCase):
             stack.enter_context(patch.object(push_cards, "log"))
             stack.enter_context(patch.dict(os.environ, {"NOTION_TOKEN": "test-only", "ANKI_DECKS_DS_ID": "test-only"}))
             stack.enter_context(patch("anki.collection.Collection", return_value=col))
-            stack.enter_context(patch.object(push_cards, "sync_pull", side_effect=pull_error, return_value=object()))
-            stack.enter_context(patch.object(push_cards, "sync_push", side_effect=push_error))
+            if incomplete_phase is None:
+                stack.enter_context(patch.object(push_cards, "sync_pull", side_effect=pull_error, return_value=object()))
+                stack.enter_context(patch.object(push_cards, "sync_push", side_effect=push_error))
+            else:
+                stack.enter_context(patch.dict(os.environ, {"ANKIWEB_USER": "test@example.invalid", "ANKIWEB_PASS": "test-only"}))
+                col.sync_login.return_value = SyncAuth(hkey="test-only")
+                incomplete = SyncCollectionResponse(required=SyncCollectionResponse.FULL_SYNC)
+                complete = SyncCollectionResponse(required=SyncCollectionResponse.NO_CHANGES)
+                col.sync_collection.side_effect = [incomplete] if incomplete_phase == "pull" else [complete, incomplete]
             stack.enter_context(patch.object(push_cards, "push_batch_to_collection", side_effect=batch_error, return_value={"added": 1, "skipped": 0, "failed": card_failures}))
             fallback_mock = stack.enter_context(patch.object(push_cards, "fallback_apkg_notion", return_value=fallback))
             find_row = stack.enter_context(patch.object(push_cards, "notion_find_deck_row", return_value="test-row"))
@@ -125,6 +178,16 @@ class DeliveryTests(unittest.TestCase):
                 stack.enter_context(patch.dict(sys.modules, {"anki.collection": None}))
             result = push_cards.main()
             return result, fallback_mock.call_count, find_row.call_count, request_patch.call_count, col
+
+    def test_incomplete_sync_response_triggers_fallback(self):
+        for phase in ("pull", "push"):
+            for fallback in (True, False):
+                with self.subTest(phase=phase, fallback=fallback):
+                    result, calls, updates, patches, col = self.run_delivery(incomplete_phase=phase, fallback=fallback)
+                    self.assertEqual(result, 0 if fallback else 1)
+                    self.assertEqual((calls, updates, patches), (1, 0, 0))
+                    col.full_upload_or_download.assert_not_called()
+                    col.close.assert_called_once()
 
     def test_no_batches_is_success(self):
         with patch.object(push_cards, "load_batches", return_value=[]):

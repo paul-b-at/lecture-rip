@@ -329,19 +329,41 @@ def fallback_apkg_notion(batch: dict[str, Any]) -> bool:
         return False
 
 
+def sync_collection_checked(col: Any, auth: Any, phase: str) -> None:
+    """A returned sync request is not necessarily a completed sync.
+
+    Never choose a full-sync direction automatically: uploading could overwrite
+    AnkiWeb, and downloading after adding cards could discard local additions.
+    Let the caller deliver an APKG instead.
+    """
+    from anki.sync_pb2 import SyncCollectionResponse
+
+    result = col.sync_collection(auth, sync_media=False)
+    required = result.required
+    state = SyncCollectionResponse.ChangesRequired.Name(required)
+    log(f"[push_cards] {phase} sync result: {state}")
+    if result.new_endpoint:
+        auth.endpoint = result.new_endpoint
+    if required != SyncCollectionResponse.NO_CHANGES:
+        raise SyncConflictError(
+            f"{phase} sync incomplete ({state}); refusing automatic full sync — "
+            "using .apkg fallback"
+        )
+
+
 def sync_pull(col: Any) -> Any:
     user = (os.environ.get("ANKIWEB_USER") or "").strip()
     password = (os.environ.get("ANKIWEB_PASS") or "").strip()
     if not user or not password:
         raise RuntimeError("ANKIWEB_USER / ANKIWEB_PASS not set")
     auth = col.sync_login(user, password, endpoint=None)
-    col.sync_collection(auth, sync_media=False)
+    sync_collection_checked(col, auth, "pull")
     return auth
 
 
 def sync_push(col: Any, auth: Any) -> None:
     try:
-        col.sync_collection(auth, sync_media=False)
+        sync_collection_checked(col, auth, "push")
     except Exception as e:
         msg = str(e).lower()
         if "conflict" in msg or "sync" in msg:
