@@ -32,7 +32,7 @@ def main() -> int:
     try:
         print("[anki-smoke] Attempting AnkiWeb login...")
         try:
-            auth = col.sync_login(user, password)
+            auth = col.sync_login(user, password, endpoint=None)
         except Exception as e:
             msg = str(e).lower()
             print(f"[anki-smoke] ERROR: AnkiWeb login failed: {e}", file=sys.stderr)

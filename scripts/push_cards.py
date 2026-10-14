@@ -55,6 +55,21 @@ def deck_name(course_slug: str) -> str:
     return f"JKU::{course_slug}"
 
 
+def tags_for_card(batch: dict[str, Any], card: dict[str, Any]) -> list[str]:
+    """Use the same whitespace-free, deduplicated tags for sync and .apkg export."""
+    raw = [
+        lec_tag(batch["lectureDate"]),
+        batch["courseSlug"],
+        *(card.get("tags") or []),
+    ]
+    tags = [
+        "_".join(tag.split())
+        for tag in raw
+        if isinstance(tag, str) and tag.strip()
+    ]
+    return list(dict.fromkeys(tags))
+
+
 def count_by_type(cards: list[dict[str, Any]]) -> dict[str, int]:
     counts = {"mc": 0, "basic": 0, "cloze": 0}
     for c in cards:
@@ -95,10 +110,7 @@ def add_note_to_collection(
     for i, val in enumerate(fields):
         note.fields[i] = val
 
-    tags = list(dict.fromkeys(
-        [lec_tag(batch["lectureDate"]), batch["courseSlug"], *card.get("tags", [])]
-    ))
-    note.tags = tags
+    note.tags = tags_for_card(batch, card)
     col.add_note(note, deck_id)
     return "added"
 
@@ -144,7 +156,7 @@ def build_genanki_deck(batch: dict[str, Any]) -> genanki.Deck:
             model=model,
             fields=fields,
             guid=guid,
-            tags=[lec_tag(batch["lectureDate"]), batch["courseSlug"], *card.get("tags", [])],
+            tags=tags_for_card(batch, card),
         )
         deck.add_note(note)
     return deck
@@ -322,7 +334,7 @@ def sync_pull(col: Any) -> Any:
     password = (os.environ.get("ANKIWEB_PASS") or "").strip()
     if not user or not password:
         raise RuntimeError("ANKIWEB_USER / ANKIWEB_PASS not set")
-    auth = col.sync_login(user, password)
+    auth = col.sync_login(user, password, endpoint=None)
     col.sync_collection(auth, sync_media=False)
     return auth
 
@@ -358,11 +370,13 @@ def main() -> int:
         for batch in batches:
             if fallback_apkg_notion(batch):
                 totals["fallback"] += 1
+            else:
+                totals["failed"] += 1
         log(
             f"[push_cards] summary lectures={len(batches)} added=0 skipped-dupes=0 "
-            f"failed=0 fallback={totals['fallback']} (anki not installed)"
+            f"failed={totals['failed']} fallback={totals['fallback']} (anki not installed)"
         )
-        return 0
+        return 1 if totals["failed"] else 0
 
     COLLECTION_PATH.parent.mkdir(parents=True, exist_ok=True)
     col = Collection(str(COLLECTION_PATH))
@@ -385,8 +399,9 @@ def main() -> int:
             f"[push_cards] summary lectures={totals['lectures']} added=0 skipped-dupes=0 "
             f"failed={totals['failed']} fallback={totals['fallback']}"
         )
-        return 0
+        return 1 if totals["failed"] else 0
 
+    push_succeeded = False
     try:
         for batch in batches:
             totals["lectures"] += 1
@@ -402,25 +417,34 @@ def main() -> int:
                 )
             except Exception as e:
                 log(f"[push_cards] Batch failed ({lecture_id}): {e}")
-                totals["failed"] += 1
                 if fallback_apkg_notion(batch):
                     totals["fallback"] += 1
+                else:
+                    totals["failed"] += 1
 
         if sync_ok and auth is not None:
             try:
                 sync_push(col, auth)
-            except SyncConflictError as e:
-                log(f"[push_cards] Sync conflict on push — falling back affected batches: {e}")
+                push_succeeded = True
+            except Exception as e:
+                log(f"[push_cards] Push sync failed — using .apkg fallback: {e}")
                 for batch in batches:
                     if fallback_apkg_notion(batch):
                         totals["fallback"] += 1
-            except Exception as e:
-                log(f"[push_cards] Push sync failed (notes may be local only): {e}")
+                    else:
+                        totals["failed"] += 1
 
         # Mark synced rows in Notion when push succeeded without conflict fallback
         token = (os.environ.get("NOTION_TOKEN") or "").strip()
         db_id = (os.environ.get("ANKI_DECKS_DS_ID") or "").strip()
-        if token and db_id and totals["added"] > 0 and totals["fallback"] == 0:
+        if (
+            push_succeeded
+            and token
+            and db_id
+            and totals["added"] > 0
+            and totals["fallback"] == 0
+            and totals["failed"] == 0
+        ):
             by_course: dict[str, list[dict[str, Any]]] = defaultdict(list)
             for batch in batches:
                 by_course[batch["courseSlug"]].append(batch)
@@ -469,13 +493,13 @@ def main() -> int:
         f"skipped-dupes={totals['skipped_dupes']} failed={totals['failed']} "
         f"fallback={totals['fallback']}"
     )
-    return 0
+    return 1 if totals["failed"] else 0
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as e:
-        log(f"[push_cards] Fatal error (non-blocking): {e}")
+        log(f"[push_cards] Fatal error: {e}")
         traceback.print_exc()
-        raise SystemExit(0)
+        raise SystemExit(1)
