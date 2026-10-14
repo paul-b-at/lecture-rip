@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import sqlite3
 import subprocess
@@ -85,6 +86,80 @@ class TagTests(unittest.TestCase):
                 self.assertIn("Problem_Solving", tags.split())
                 self.assertNotIn("Problem Solving", tags)
             self.assertIn(push_cards.note_guid(BATCH["lectureId"], BATCH["cards"][0]["front"]), [row[0] for row in notes])
+
+
+class NotionUploadTests(unittest.TestCase):
+    @staticmethod
+    def error_response(*, json_body=True):
+        response = push_cards.requests.Response()
+        response.status_code = 400
+        response.url = "https://api.notion.com/v1/file_uploads"
+        response._content = (
+            json.dumps({"code": "validation_error", "message": "Unsupported file type"}).encode()
+            if json_body else b"Bad Request"
+        )
+        return response
+
+    def test_zip_contains_unchanged_importable_apkg(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(push_cards, "OUT_DIR", Path(directory)):
+            apkg = push_cards.write_apkg(copy.deepcopy(BATCH))
+            original = apkg.read_bytes()
+            archive_path = push_cards.zip_apkg_for_notion(apkg)
+            self.assertEqual(archive_path.name, apkg.name + ".zip")
+            with zipfile.ZipFile(archive_path) as archive:
+                self.assertEqual(archive.namelist(), [apkg.name])
+                self.assertEqual(archive.read(apkg.name), original)
+            self.assertEqual(apkg.read_bytes(), original)
+
+    def test_upload_uses_zip_filename_and_mime_for_create_and_send(self):
+        calls = []
+        def post(url, **kwargs):
+            calls.append((url, kwargs))
+            response = MagicMock()
+            response.json.return_value = {"id": "test-upload"}
+            if url.endswith("/send"):
+                name, file, mime = kwargs["files"]["file"]
+                self.assertEqual(name, "deck.apkg.zip")
+                self.assertEqual(mime, "application/zip")
+                self.assertEqual(file.read(), b"zip-payload")
+            return response
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "deck.apkg.zip"
+            file.write_bytes(b"zip-payload")
+            with patch.object(push_cards.requests, "post", side_effect=post):
+                self.assertEqual(push_cards.notion_upload_file("test-only", file), "test-upload")
+        self.assertEqual(calls[0][1]["json"], {
+            "mode": "single_part", "filename": "deck.apkg.zip", "content_type": "application/zip",
+        })
+        self.assertNotIn("Content-Type", calls[1][1]["headers"])
+
+    def test_upload_errors_include_notion_validation_reason(self):
+        for stage in ("create", "send"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                file = Path(directory) / "deck.apkg.zip"
+                file.write_bytes(b"zip-payload")
+                ok = MagicMock()
+                ok.json.return_value = {"id": "test-upload"}
+                responses = [self.error_response()] if stage == "create" else [ok, self.error_response()]
+                with patch.object(push_cards.requests, "post", side_effect=responses):
+                    with self.assertRaisesRegex(RuntimeError, "HTTP 400, validation_error.*Unsupported file type"):
+                        push_cards.notion_upload_file("private-test-token", file)
+
+    def test_non_json_upload_error_has_useful_fallback(self):
+        with self.assertRaisesRegex(RuntimeError, "HTTP 400, unknown_error"):
+            push_cards.notion_check_response(self.error_response(json_body=False), "create file upload")
+
+    @patch.dict(os.environ, {"NOTION_TOKEN": "test-only", "ANKI_DECKS_DS_ID": "test-only", "NTFY_TOPIC": ""})
+    def test_fallback_uploads_and_attaches_zip_not_raw_apkg(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(push_cards, "OUT_DIR", Path(directory)):
+            def upload(token, path):
+                self.assertEqual(path.suffix, ".zip")
+                with zipfile.ZipFile(path) as archive:
+                    self.assertEqual(archive.namelist(), [path.stem])
+                return "test-upload"
+            with patch.object(push_cards, "notion_upload_file", side_effect=upload), patch.object(push_cards, "notion_upsert_deck_row", return_value="test-page") as upsert, patch.object(push_cards, "log"):
+                self.assertTrue(push_cards.fallback_apkg_notion(copy.deepcopy(BATCH)))
+                self.assertTrue(upsert.call_args.args[3].name.endswith(".apkg.zip"))
 
 
 class LoginTests(unittest.TestCase):

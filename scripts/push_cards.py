@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import traceback
+import zipfile
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -186,18 +187,47 @@ def notion_headers(token: str) -> dict[str, str]:
     }
 
 
+def zip_apkg_for_notion(apkg_path: Path) -> Path:
+    """Notion supports ZIP uploads, but not the .apkg extension.
+
+    Wrap the original package instead of relabeling it: users extract the ZIP
+    and import its unchanged .apkg into Anki.
+    """
+    archive_path = apkg_path.with_suffix(apkg_path.suffix + ".zip")
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.write(apkg_path, arcname=apkg_path.name)
+    return archive_path
+
+
+def notion_check_response(response: requests.Response, action: str) -> None:
+    """Surface Notion's validation reason, without logging request headers."""
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as error:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        code = str(payload.get("code", "unknown_error"))[:100]
+        message = str(payload.get("message", "No JSON error message returned"))[:1000]
+        raise RuntimeError(
+            f"Notion {action} failed (HTTP {response.status_code}, {code}): {message}"
+        ) from error
+
+
 def notion_upload_file(token: str, file_path: Path) -> str:
     """Upload file via Notion file_uploads API; return file_upload id."""
     create = requests.post(
         "https://api.notion.com/v1/file_uploads",
         headers=notion_headers(token),
         json={
+            "mode": "single_part",
             "filename": file_path.name,
-            "content_type": "application/octet-stream",
+            "content_type": "application/zip",
         },
         timeout=120,
     )
-    create.raise_for_status()
+    notion_check_response(create, "create file upload")
     upload_id = create.json()["id"]
 
     with file_path.open("rb") as fh:
@@ -207,10 +237,10 @@ def notion_upload_file(token: str, file_path: Path) -> str:
                 "Authorization": f"Bearer {token}",
                 "Notion-Version": NOTION_VERSION,
             },
-            files={"file": (file_path.name, fh, "application/octet-stream")},
+            files={"file": (file_path.name, fh, "application/zip")},
             timeout=300,
         )
-    send.raise_for_status()
+    notion_check_response(send, "send file upload")
     return upload_id
 
 
@@ -312,15 +342,19 @@ def fallback_apkg_notion(batch: dict[str, Any]) -> bool:
 
     try:
         apkg_path = write_apkg(batch)
-        upload_id = notion_upload_file(token, apkg_path)
-        page_id = notion_upsert_deck_row(token, database_id, batch, apkg_path, upload_id)
+        upload_path = zip_apkg_for_notion(apkg_path)
+        upload_id = notion_upload_file(token, upload_path)
+        page_id = notion_upsert_deck_row(token, database_id, batch, upload_path, upload_id)
         counts = count_by_type(batch.get("cards") or [])
         total = sum(counts.values())
         notion_url = f"https://notion.so/{page_id.replace('-', '')}"
-        log(f"[push_cards] Fallback .apkg → Notion ({total} cards): {notion_url}")
+        log(
+            f"[push_cards] Fallback .apkg.zip → Notion ({total} cards): {notion_url} "
+            "— extract ZIP, then import the .apkg into Anki"
+        )
         ntfy_ping(
             ntfy_topic,
-            f"lecture-rip Anki fallback: {batch['courseSlug']} {total} cards → {notion_url}",
+            f"lecture-rip Anki fallback: {batch['courseSlug']} {total} cards → {notion_url} (unzip, then import .apkg)",
         )
         return True
     except Exception as e:
