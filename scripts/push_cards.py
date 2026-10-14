@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import genanki
 import requests
 
+from anki_sync import SyncConflictError, checked_sync
+
 from anki_models import (
     collection_model_id,
     deck_id_for_name,
@@ -32,10 +34,6 @@ COLLECTION_PATH = Path(".cache/anki/collection.anki2")
 CARDS_PATH = Path("out/cards.json")
 OUT_DIR = Path("out")
 NOTION_VERSION = "2022-06-28"
-
-
-class SyncConflictError(Exception):
-    """Raised when AnkiWeb sync conflicts — triggers .apkg fallback, no force overwrite."""
 
 
 def log(msg: str) -> None:
@@ -363,26 +361,12 @@ def fallback_apkg_notion(batch: dict[str, Any]) -> bool:
         return False
 
 
-def sync_collection_checked(col: Any, auth: Any, phase: str) -> None:
-    """A returned sync request is not necessarily a completed sync.
-
-    Never choose a full-sync direction automatically: uploading could overwrite
-    AnkiWeb, and downloading after adding cards could discard local additions.
-    Let the caller deliver an APKG instead.
-    """
-    from anki.sync_pb2 import SyncCollectionResponse
-
-    result = col.sync_collection(auth, sync_media=False)
-    required = result.required
-    state = SyncCollectionResponse.ChangesRequired.Name(required)
-    log(f"[push_cards] {phase} sync result: {state}")
-    if result.new_endpoint:
-        auth.endpoint = result.new_endpoint
-    if required != SyncCollectionResponse.NO_CHANGES:
-        raise SyncConflictError(
-            f"{phase} sync incomplete ({state}); refusing automatic full sync — "
-            "using .apkg fallback"
-        )
+def sync_collection_checked(
+    col: Any, auth: Any, phase: str, *, allow_initial_download: bool = False
+) -> None:
+    checked_sync(
+        col, auth, phase, allow_initial_download=allow_initial_download, log=log
+    )
 
 
 def sync_pull(col: Any) -> Any:
@@ -391,7 +375,8 @@ def sync_pull(col: Any) -> Any:
     if not user or not password:
         raise RuntimeError("ANKIWEB_USER / ANKIWEB_PASS not set")
     auth = col.sync_login(user, password, endpoint=None)
-    sync_collection_checked(col, auth, "pull")
+    log("[push_cards] AnkiWeb login succeeded")
+    sync_collection_checked(col, auth, "pull", allow_initial_download=True)
     return auth
 
 
@@ -443,7 +428,7 @@ def main() -> int:
         auth = sync_pull(col)
         sync_ok = True
     except Exception as e:
-        log(f"[push_cards] AnkiWeb login/sync failed — using .apkg fallback: {e}")
+        log(f"[push_cards] AnkiWeb authentication or collection sync could not complete — using .apkg fallback: {e}")
         col.close()
         for batch in batches:
             totals["lectures"] += 1
@@ -482,6 +467,7 @@ def main() -> int:
             try:
                 sync_push(col, auth)
                 push_succeeded = True
+                log("[push_cards] AnkiWeb push sync completed")
             except Exception as e:
                 log(f"[push_cards] Push sync failed — using .apkg fallback: {e}")
                 for batch in batches:

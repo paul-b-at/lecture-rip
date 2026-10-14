@@ -226,6 +226,132 @@ class SyncResultTests(unittest.TestCase):
         col.close.assert_called_once()
 
 
+class BootstrapTests(unittest.TestCase):
+    @staticmethod
+    def collection(*states, notes=0, cards=0):
+        col = create_autospec(Collection, instance=True)
+        col.note_count.return_value = notes
+        col.card_count.return_value = cards
+        col.sync_collection.side_effect = [
+            SyncCollectionResponse(required=state) for state in states
+        ]
+        return col
+
+    def test_empty_pull_downloads_once_reopens_and_verifies(self):
+        col = self.collection(SyncCollectionResponse.FULL_DOWNLOAD, SyncCollectionResponse.NO_CHANGES)
+        auth = SyncAuth(hkey="test-only")
+        push_cards.sync_collection_checked(col, auth, "pull", allow_initial_download=True)
+        col.full_upload_or_download.assert_called_once_with(auth=auth, server_usn=None, upload=False)
+        col.reopen.assert_called_once_with(after_full_sync=True)
+        calls = [call[0] for call in col.mock_calls]
+        self.assertLess(calls.index("note_count"), calls.index("close_for_full_sync"))
+        self.assertLess(calls.index("card_count"), calls.index("close_for_full_sync"))
+        self.assertLess(calls.index("close_for_full_sync"), calls.index("full_upload_or_download"))
+        self.assertLess(calls.index("full_upload_or_download"), calls.index("reopen"))
+        self.assertEqual(calls[-1], "sync_collection")
+
+    def test_initial_download_uses_redirected_endpoint(self):
+        col = self.collection(SyncCollectionResponse.FULL_DOWNLOAD, SyncCollectionResponse.NO_CHANGES)
+        col.sync_collection.side_effect = [
+            SyncCollectionResponse(required=SyncCollectionResponse.FULL_DOWNLOAD, new_endpoint="https://sync.example.invalid/"),
+            SyncCollectionResponse(required=SyncCollectionResponse.NO_CHANGES),
+        ]
+        auth = SyncAuth(hkey="test-only")
+        def download(**kwargs):
+            self.assertEqual(kwargs["auth"].endpoint, "https://sync.example.invalid/")
+            self.assertFalse(kwargs["upload"])
+        col.full_upload_or_download.side_effect = download
+        push_cards.sync_collection_checked(col, auth, "pull", allow_initial_download=True)
+
+    def test_nonempty_cards_or_orphan_notes_block_download(self):
+        for notes, cards in ((1, 1), (1, 0), (0, 1)):
+            with self.subTest(notes=notes, cards=cards):
+                col = self.collection(SyncCollectionResponse.FULL_DOWNLOAD, notes=notes, cards=cards)
+                with self.assertRaisesRegex(push_cards.SyncConflictError, "not empty"):
+                    push_cards.sync_collection_checked(col, SyncAuth(), "pull", allow_initial_download=True)
+                col.close_for_full_sync.assert_not_called()
+                col.full_upload_or_download.assert_not_called()
+
+    def test_empty_pull_never_resolves_upload_or_ambiguous_full_sync(self):
+        for state in (SyncCollectionResponse.FULL_SYNC, SyncCollectionResponse.FULL_UPLOAD, SyncCollectionResponse.NORMAL_SYNC):
+            with self.subTest(state=state):
+                col = self.collection(state)
+                with self.assertRaises(push_cards.SyncConflictError):
+                    push_cards.sync_collection_checked(col, SyncAuth(), "pull", allow_initial_download=True)
+                col.full_upload_or_download.assert_not_called()
+
+    def test_push_cannot_download_even_if_flag_is_accidentally_enabled(self):
+        col = self.collection(SyncCollectionResponse.FULL_DOWNLOAD)
+        with self.assertRaises(push_cards.SyncConflictError):
+            push_cards.sync_collection_checked(col, SyncAuth(), "push", allow_initial_download=True)
+        col.full_upload_or_download.assert_not_called()
+
+    def test_download_failure_reopens_and_propagates(self):
+        col = self.collection(SyncCollectionResponse.FULL_DOWNLOAD)
+        col.full_upload_or_download.side_effect = RuntimeError("download interrupted")
+        with self.assertRaisesRegex(RuntimeError, "download interrupted"):
+            push_cards.sync_collection_checked(col, SyncAuth(), "pull", allow_initial_download=True)
+        col.reopen.assert_called_once_with(after_full_sync=True)
+        self.assertEqual(col.sync_collection.call_count, 1)
+
+    def test_verification_failure_never_repeats_download(self):
+        for state in (SyncCollectionResponse.FULL_DOWNLOAD, SyncCollectionResponse.FULL_SYNC, SyncCollectionResponse.FULL_UPLOAD):
+            with self.subTest(state=state):
+                col = self.collection(SyncCollectionResponse.FULL_DOWNLOAD, state)
+                with self.assertRaises(push_cards.SyncConflictError):
+                    push_cards.sync_collection_checked(col, SyncAuth(), "pull", allow_initial_download=True)
+                self.assertEqual(col.full_upload_or_download.call_count, 1)
+                self.assertEqual(col.sync_collection.call_count, 2)
+
+    def test_cannot_verify_emptiness_fails_closed(self):
+        col = self.collection(SyncCollectionResponse.FULL_DOWNLOAD)
+        col.note_count.side_effect = RuntimeError("database unavailable")
+        with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            push_cards.sync_collection_checked(col, SyncAuth(), "pull", allow_initial_download=True)
+        col.full_upload_or_download.assert_not_called()
+
+    def test_existing_collection_normal_sync_skips_download(self):
+        col = self.collection(SyncCollectionResponse.NO_CHANGES, notes=10, cards=10)
+        push_cards.sync_collection_checked(col, SyncAuth(), "pull", allow_initial_download=True)
+        col.full_upload_or_download.assert_not_called()
+        col.close_for_full_sync.assert_not_called()
+
+    @patch.dict(os.environ, {"ANKIWEB_USER": "test@example.invalid", "ANKIWEB_PASS": "test-only", "NOTION_TOKEN": "", "ANKI_DECKS_DS_ID": ""})
+    def test_main_downloads_before_adding_then_pushes_and_reuses_collection(self):
+        col = self.collection(SyncCollectionResponse.FULL_DOWNLOAD, *([SyncCollectionResponse.NO_CHANGES] * 4))
+        col.sync_login.return_value = SyncAuth(hkey="test-only")
+        events = []
+        col.full_upload_or_download.side_effect = lambda **kwargs: events.append("download")
+        col.reopen.side_effect = lambda **kwargs: events.append("reopen")
+        def add(*args):
+            self.assertIn("reopen", events)
+            self.assertEqual(col.sync_collection.call_count, 2)
+            events.append("add")
+            return {"added": 8, "skipped": 0, "failed": 0}
+        with tempfile.TemporaryDirectory() as directory, patch.object(push_cards, "COLLECTION_PATH", Path(directory) / "collection.anki2"), patch("anki.collection.Collection", return_value=col), patch.object(push_cards, "load_batches", return_value=[copy.deepcopy(BATCH)]), patch.object(push_cards, "fallback_apkg_notion") as fallback, patch.object(push_cards, "push_batch_to_collection", side_effect=add), patch.object(push_cards, "log") as log:
+            self.assertEqual(push_cards.main(), 0)
+            self.assertEqual(events, ["download", "reopen", "add"])
+            self.assertEqual(col.sync_collection.call_count, 3)
+            fallback.assert_not_called()
+            log.assert_any_call("[push_cards] AnkiWeb push sync completed")
+            # The next run does normal pull/push only, without another download.
+            with patch.object(push_cards, "push_batch_to_collection", return_value={"added": 0, "skipped": 8, "failed": 0}):
+                self.assertEqual(push_cards.main(), 0)
+            self.assertEqual(col.full_upload_or_download.call_count, 1)
+            self.assertEqual(col.sync_collection.call_count, 5)
+
+    @patch.dict(os.environ, {"ANKIWEB_USER": "test@example.invalid", "ANKIWEB_PASS": "test-only"})
+    def test_smoke_bootstraps_with_same_safe_helper(self):
+        col = self.collection(SyncCollectionResponse.FULL_DOWNLOAD, SyncCollectionResponse.NO_CHANGES)
+        col.decks = MagicMock()
+        col.decks.all_names_and_ids.return_value = []
+        with tempfile.TemporaryDirectory() as directory, patch.object(anki_smoke, "COLLECTION_PATH", Path(directory) / "collection.anki2"), patch("anki.collection.Collection", return_value=col):
+            self.assertEqual(anki_smoke.main(), 0)
+        col.full_upload_or_download.assert_called_once()
+        self.assertFalse(col.full_upload_or_download.call_args.kwargs["upload"])
+        col.close.assert_called_once()
+
+
 class DeliveryTests(unittest.TestCase):
     def run_delivery(self, *, pull_error=None, push_error=None, fallback=True, missing_anki=False, card_failures=0, batch_error=None, incomplete_phase=None):
         col = MagicMock()

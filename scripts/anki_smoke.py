@@ -48,14 +48,12 @@ def main() -> int:
             return 1
 
         print("[anki-smoke] Login OK — pulling collection (sync_media=False)...")
-        result = col.sync_collection(auth, sync_media=False)
-        if result.required != result.NO_CHANGES:
-            state = result.ChangesRequired.Name(result.required)
-            print(
-                f"[anki-smoke] ERROR: Collection sync incomplete ({state}); "
-                "no full-sync direction was chosen automatically.",
-                file=sys.stderr,
-            )
+        from anki_sync import checked_sync
+
+        try:
+            checked_sync(col, auth, "pull", allow_initial_download=True)
+        except Exception as e:
+            print(f"[anki-smoke] ERROR: Collection sync could not complete: {e}", file=sys.stderr)
             return 1
 
         deck_names = [d["name"] for d in col.decks.all_names_and_ids()]
