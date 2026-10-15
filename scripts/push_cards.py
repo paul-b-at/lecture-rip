@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import traceback
+import zipfile
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -17,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import genanki
 import requests
+
+from anki_sync import SyncConflictError, checked_sync
 
 from anki_models import (
     collection_model_id,
@@ -31,10 +34,6 @@ COLLECTION_PATH = Path(".cache/anki/collection.anki2")
 CARDS_PATH = Path("out/cards.json")
 OUT_DIR = Path("out")
 NOTION_VERSION = "2022-06-28"
-
-
-class SyncConflictError(Exception):
-    """Raised when AnkiWeb sync conflicts — triggers .apkg fallback, no force overwrite."""
 
 
 def log(msg: str) -> None:
@@ -53,6 +52,21 @@ def lec_tag(lecture_date: str) -> str:
 
 def deck_name(course_slug: str) -> str:
     return f"JKU::{course_slug}"
+
+
+def tags_for_card(batch: dict[str, Any], card: dict[str, Any]) -> list[str]:
+    """Use the same whitespace-free, deduplicated tags for sync and .apkg export."""
+    raw = [
+        lec_tag(batch["lectureDate"]),
+        batch["courseSlug"],
+        *(card.get("tags") or []),
+    ]
+    tags = [
+        "_".join(tag.split())
+        for tag in raw
+        if isinstance(tag, str) and tag.strip()
+    ]
+    return list(dict.fromkeys(tags))
 
 
 def count_by_type(cards: list[dict[str, Any]]) -> dict[str, int]:
@@ -95,10 +109,7 @@ def add_note_to_collection(
     for i, val in enumerate(fields):
         note.fields[i] = val
 
-    tags = list(dict.fromkeys(
-        [lec_tag(batch["lectureDate"]), batch["courseSlug"], *card.get("tags", [])]
-    ))
-    note.tags = tags
+    note.tags = tags_for_card(batch, card)
     col.add_note(note, deck_id)
     return "added"
 
@@ -144,7 +155,7 @@ def build_genanki_deck(batch: dict[str, Any]) -> genanki.Deck:
             model=model,
             fields=fields,
             guid=guid,
-            tags=[lec_tag(batch["lectureDate"]), batch["courseSlug"], *card.get("tags", [])],
+            tags=tags_for_card(batch, card),
         )
         deck.add_note(note)
     return deck
@@ -174,18 +185,47 @@ def notion_headers(token: str) -> dict[str, str]:
     }
 
 
+def zip_apkg_for_notion(apkg_path: Path) -> Path:
+    """Notion supports ZIP uploads, but not the .apkg extension.
+
+    Wrap the original package instead of relabeling it: users extract the ZIP
+    and import its unchanged .apkg into Anki.
+    """
+    archive_path = apkg_path.with_suffix(apkg_path.suffix + ".zip")
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.write(apkg_path, arcname=apkg_path.name)
+    return archive_path
+
+
+def notion_check_response(response: requests.Response, action: str) -> None:
+    """Surface Notion's validation reason, without logging request headers."""
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as error:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        code = str(payload.get("code", "unknown_error"))[:100]
+        message = str(payload.get("message", "No JSON error message returned"))[:1000]
+        raise RuntimeError(
+            f"Notion {action} failed (HTTP {response.status_code}, {code}): {message}"
+        ) from error
+
+
 def notion_upload_file(token: str, file_path: Path) -> str:
     """Upload file via Notion file_uploads API; return file_upload id."""
     create = requests.post(
         "https://api.notion.com/v1/file_uploads",
         headers=notion_headers(token),
         json={
+            "mode": "single_part",
             "filename": file_path.name,
-            "content_type": "application/octet-stream",
+            "content_type": "application/zip",
         },
         timeout=120,
     )
-    create.raise_for_status()
+    notion_check_response(create, "create file upload")
     upload_id = create.json()["id"]
 
     with file_path.open("rb") as fh:
@@ -195,10 +235,10 @@ def notion_upload_file(token: str, file_path: Path) -> str:
                 "Authorization": f"Bearer {token}",
                 "Notion-Version": NOTION_VERSION,
             },
-            files={"file": (file_path.name, fh, "application/octet-stream")},
+            files={"file": (file_path.name, fh, "application/zip")},
             timeout=300,
         )
-    send.raise_for_status()
+    notion_check_response(send, "send file upload")
     return upload_id
 
 
@@ -300,15 +340,19 @@ def fallback_apkg_notion(batch: dict[str, Any]) -> bool:
 
     try:
         apkg_path = write_apkg(batch)
-        upload_id = notion_upload_file(token, apkg_path)
-        page_id = notion_upsert_deck_row(token, database_id, batch, apkg_path, upload_id)
+        upload_path = zip_apkg_for_notion(apkg_path)
+        upload_id = notion_upload_file(token, upload_path)
+        page_id = notion_upsert_deck_row(token, database_id, batch, upload_path, upload_id)
         counts = count_by_type(batch.get("cards") or [])
         total = sum(counts.values())
         notion_url = f"https://notion.so/{page_id.replace('-', '')}"
-        log(f"[push_cards] Fallback .apkg → Notion ({total} cards): {notion_url}")
+        log(
+            f"[push_cards] Fallback .apkg.zip → Notion ({total} cards): {notion_url} "
+            "— extract ZIP, then import the .apkg into Anki"
+        )
         ntfy_ping(
             ntfy_topic,
-            f"lecture-rip Anki fallback: {batch['courseSlug']} {total} cards → {notion_url}",
+            f"lecture-rip Anki fallback: {batch['courseSlug']} {total} cards → {notion_url} (unzip, then import .apkg)",
         )
         return True
     except Exception as e:
@@ -317,19 +361,28 @@ def fallback_apkg_notion(batch: dict[str, Any]) -> bool:
         return False
 
 
+def sync_collection_checked(
+    col: Any, auth: Any, phase: str, *, allow_initial_download: bool = False
+) -> None:
+    checked_sync(
+        col, auth, phase, allow_initial_download=allow_initial_download, log=log
+    )
+
+
 def sync_pull(col: Any) -> Any:
     user = (os.environ.get("ANKIWEB_USER") or "").strip()
     password = (os.environ.get("ANKIWEB_PASS") or "").strip()
     if not user or not password:
         raise RuntimeError("ANKIWEB_USER / ANKIWEB_PASS not set")
-    auth = col.sync_login(user, password)
-    col.sync_collection(auth, sync_media=False)
+    auth = col.sync_login(user, password, endpoint=None)
+    log("[push_cards] AnkiWeb login succeeded")
+    sync_collection_checked(col, auth, "pull", allow_initial_download=True)
     return auth
 
 
 def sync_push(col: Any, auth: Any) -> None:
     try:
-        col.sync_collection(auth, sync_media=False)
+        sync_collection_checked(col, auth, "push")
     except Exception as e:
         msg = str(e).lower()
         if "conflict" in msg or "sync" in msg:
@@ -358,11 +411,13 @@ def main() -> int:
         for batch in batches:
             if fallback_apkg_notion(batch):
                 totals["fallback"] += 1
+            else:
+                totals["failed"] += 1
         log(
             f"[push_cards] summary lectures={len(batches)} added=0 skipped-dupes=0 "
-            f"failed=0 fallback={totals['fallback']} (anki not installed)"
+            f"failed={totals['failed']} fallback={totals['fallback']} (anki not installed)"
         )
-        return 0
+        return 1 if totals["failed"] else 0
 
     COLLECTION_PATH.parent.mkdir(parents=True, exist_ok=True)
     col = Collection(str(COLLECTION_PATH))
@@ -373,7 +428,7 @@ def main() -> int:
         auth = sync_pull(col)
         sync_ok = True
     except Exception as e:
-        log(f"[push_cards] AnkiWeb login/sync failed — using .apkg fallback: {e}")
+        log(f"[push_cards] AnkiWeb authentication or collection sync could not complete — using .apkg fallback: {e}")
         col.close()
         for batch in batches:
             totals["lectures"] += 1
@@ -385,8 +440,9 @@ def main() -> int:
             f"[push_cards] summary lectures={totals['lectures']} added=0 skipped-dupes=0 "
             f"failed={totals['failed']} fallback={totals['fallback']}"
         )
-        return 0
+        return 1 if totals["failed"] else 0
 
+    push_succeeded = False
     try:
         for batch in batches:
             totals["lectures"] += 1
@@ -402,25 +458,35 @@ def main() -> int:
                 )
             except Exception as e:
                 log(f"[push_cards] Batch failed ({lecture_id}): {e}")
-                totals["failed"] += 1
                 if fallback_apkg_notion(batch):
                     totals["fallback"] += 1
+                else:
+                    totals["failed"] += 1
 
         if sync_ok and auth is not None:
             try:
                 sync_push(col, auth)
-            except SyncConflictError as e:
-                log(f"[push_cards] Sync conflict on push — falling back affected batches: {e}")
+                push_succeeded = True
+                log("[push_cards] AnkiWeb push sync completed")
+            except Exception as e:
+                log(f"[push_cards] Push sync failed — using .apkg fallback: {e}")
                 for batch in batches:
                     if fallback_apkg_notion(batch):
                         totals["fallback"] += 1
-            except Exception as e:
-                log(f"[push_cards] Push sync failed (notes may be local only): {e}")
+                    else:
+                        totals["failed"] += 1
 
         # Mark synced rows in Notion when push succeeded without conflict fallback
         token = (os.environ.get("NOTION_TOKEN") or "").strip()
         db_id = (os.environ.get("ANKI_DECKS_DS_ID") or "").strip()
-        if token and db_id and totals["added"] > 0 and totals["fallback"] == 0:
+        if (
+            push_succeeded
+            and token
+            and db_id
+            and totals["added"] > 0
+            and totals["fallback"] == 0
+            and totals["failed"] == 0
+        ):
             by_course: dict[str, list[dict[str, Any]]] = defaultdict(list)
             for batch in batches:
                 by_course[batch["courseSlug"]].append(batch)
@@ -469,13 +535,13 @@ def main() -> int:
         f"skipped-dupes={totals['skipped_dupes']} failed={totals['failed']} "
         f"fallback={totals['fallback']}"
     )
-    return 0
+    return 1 if totals["failed"] else 0
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as e:
-        log(f"[push_cards] Fatal error (non-blocking): {e}")
+        log(f"[push_cards] Fatal error: {e}")
         traceback.print_exc()
-        raise SystemExit(0)
+        raise SystemExit(1)

@@ -32,7 +32,7 @@ def main() -> int:
     try:
         print("[anki-smoke] Attempting AnkiWeb login...")
         try:
-            auth = col.sync_login(user, password)
+            auth = col.sync_login(user, password, endpoint=None)
         except Exception as e:
             msg = str(e).lower()
             print(f"[anki-smoke] ERROR: AnkiWeb login failed: {e}", file=sys.stderr)
@@ -48,7 +48,13 @@ def main() -> int:
             return 1
 
         print("[anki-smoke] Login OK — pulling collection (sync_media=False)...")
-        col.sync_collection(auth, sync_media=False)
+        from anki_sync import checked_sync
+
+        try:
+            checked_sync(col, auth, "pull", allow_initial_download=True)
+        except Exception as e:
+            print(f"[anki-smoke] ERROR: Collection sync could not complete: {e}", file=sys.stderr)
+            return 1
 
         deck_names = [d["name"] for d in col.decks.all_names_and_ids()]
         print(f"[anki-smoke] Sync OK — {len(deck_names)} deck(s) in collection (names not printed)")
