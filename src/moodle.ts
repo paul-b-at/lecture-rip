@@ -128,14 +128,18 @@ export class MoodleSession {
           throw new MissingMoodleCredentialsError(`Missing Moodle sign-in environment variables: ${missing}. Add the repository Actions secrets AND map them into the Run pipeline step's env. MEDIA_SESSION_COOKIE does not authenticate Moodle.`)
         }
         await page.goto(`${MOODLE}/login/index.php`, { waitUntil: 'domcontentloaded' })
-        const username = page.locator('#username, input[name="j_username"]').first()
-        await username.waitFor({ state: 'visible', timeout: 30_000 })
+        // JKU SSO now redirects to the access.jku.at login form.
+        const username = page.locator('#Ecom_User_ID')
+        await username.waitFor({ state: 'visible', timeout: 60_000 })
         await username.fill(user)
-        await page.locator('#password, input[name="j_password"]').first().fill(pass)
+        await page.locator('#Ecom_Password').fill(pass)
         const noRemember = page.locator('#donotcache')
         if (await noRemember.isVisible()) await noRemember.uncheck()
-        await page.locator('button[name="_eventId_proceed"], button[type="submit"], input[type="submit"]').first().click()
-        await page.waitForURL(`${MOODLE}/**`, { timeout: 60_000, waitUntil: 'domcontentloaded' })
+        // The current Login control is a span; register the SSO return wait first.
+        await Promise.all([
+          page.waitForURL(url => url.origin === MOODLE, { timeout: 60_000, waitUntil: 'domcontentloaded' }),
+          page.locator('#loginButton2').click(),
+        ])
       }
       if (!(await ready())) throw new Error('Moodle returned a guest or unauthenticated page after sign-in')
       return new MoodleSession(page)
